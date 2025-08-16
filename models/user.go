@@ -20,24 +20,19 @@ const (
 // User represents a user in the system
 type User struct {
 	ID       primitive.ObjectID `bson:"_id,omitempty" json:"id"`
-	UserID   string             `bson:"user_id" json:"user_id"`
 	Username string             `bson:"username" json:"username"`
 	Email    string             `bson:"email" json:"email"`
-	FullName string             `bson:"full_name" json:"full_name"`
+	Password string             `bson:"password" json:"-"` // Hashed password
+
+	// Name fields
+	FirstName string `bson:"first_name" json:"first_name"`
+	LastName  string `bson:"last_name" json:"last_name"`
 
 	// Company association
-	CompanyID   string `bson:"company_id" json:"company_id"`
-	CompanyName string `bson:"company_name" json:"company_name"`
+	CompanyID string `bson:"company_id" json:"company_id"`
 
 	// Role and permissions
 	Role UserRole `bson:"role" json:"role"`
-
-	// For Bot Managers - which pages they can manage
-	AssignedPages []string `bson:"assigned_pages,omitempty" json:"assigned_pages,omitempty"`
-
-	// Authentication
-	PasswordHash string `bson:"password_hash" json:"-"`
-	APIKey       string `bson:"api_key,omitempty" json:"api_key,omitempty"`
 
 	// Status
 	IsActive  bool      `bson:"is_active" json:"is_active"`
@@ -46,7 +41,6 @@ type User struct {
 	// Metadata
 	CreatedAt time.Time `bson:"created_at" json:"created_at"`
 	UpdatedAt time.Time `bson:"updated_at" json:"updated_at"`
-	CreatedBy string    `bson:"created_by,omitempty" json:"created_by,omitempty"`
 }
 
 // RolePermissions defines what each role can do

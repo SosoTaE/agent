@@ -18,7 +18,7 @@ func InitializeCRMData(ctx context.Context) error {
 		return fmt.Errorf("failed to get companies: %w", err)
 	}
 
-	// Create a map of pageID to companyID
+	// Create a map of pageID to companyID from companies with pages array
 	pageToCompany := make(map[string]string)
 	for _, company := range companies {
 		for _, page := range company.Pages {
@@ -84,7 +84,7 @@ func StartCRMUpdateScheduler(ctx context.Context) {
 		return
 	}
 
-	// Create a map of pageID to companyID
+	// Create a map of pageID to companyID from companies with pages array
 	pageToCompany := make(map[string]string)
 	for _, company := range companies {
 		for _, page := range company.Pages {

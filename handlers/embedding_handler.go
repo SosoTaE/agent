@@ -105,8 +105,14 @@ func TestVoyageEmbedding(c *fiber.Ctx) error {
 		})
 	}
 
-	// Generate embedding using Voyage
-	embedding, err := services.GetEmbeddings(ctx, req.Text, companyID)
+	// Get first page for Voyage configuration
+	var voyageModel string
+	if len(company.Pages) > 0 {
+		voyageModel = company.Pages[0].VoyageModel
+	}
+
+	// Generate embedding using Voyage (use empty pageID to get default page)
+	embedding, err := services.GetEmbeddings(ctx, req.Text, companyID, "")
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": "Failed to generate Voyage embedding: " + err.Error(),
@@ -116,7 +122,7 @@ func TestVoyageEmbedding(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{
 		"message":        "Voyage embedding generated successfully",
 		"provider":       "Voyage AI",
-		"model":          company.VoyageModel,
+		"model":          voyageModel,
 		"text":           req.Text,
 		"embedding_size": len(embedding),
 		"sample":         embedding[:10], // Show first 10 values as sample

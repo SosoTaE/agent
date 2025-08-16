@@ -70,9 +70,9 @@ func TestRAGRetrieval(c *fiber.Ctx) error {
 			})
 		}
 
-		// For backward compatibility, create a wrapper that uses empty page ID
+		// Use the first page from the company's pages array
 		if len(company.Pages) > 0 {
-			// Use first page as default
+			// Use the first page
 			ragContext, err = services.GetRAGContext(ctx, req.Query, companyID, company.Pages[0].PageID)
 		} else {
 			ragContext = "No pages configured for this company"
@@ -104,8 +104,13 @@ func TestRAGRetrieval(c *fiber.Ctx) error {
 		"search_results":     searchResults,
 		"rag_context_length": len(ragContext),
 		"rag_context":        ragContext,
-		"voyage_configured":  company.VoyageAPIKey != "",
-		"voyage_model":       company.VoyageModel,
+		"voyage_configured":  len(company.Pages) > 0 && company.Pages[0].VoyageAPIKey != "",
+		"voyage_model": func() string {
+			if len(company.Pages) > 0 {
+				return company.Pages[0].VoyageModel
+			}
+			return ""
+		}(),
 	})
 }
 

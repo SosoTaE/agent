@@ -1,6 +1,7 @@
 package webhooks
 
 import (
+	"fmt"
 	"log/slog"
 
 	"github.com/gofiber/fiber/v2"
@@ -65,6 +66,7 @@ func processWebhookEvent(body WebhookEvent) {
 		pageID := entry.ID
 
 		slog.Info("Processing webhook for page", "pageID", pageID)
+		fmt.Printf("%+v\n", body)
 
 		// Handle messaging events
 		for _, messaging := range entry.Messaging {
@@ -118,17 +120,48 @@ func processWebhookEvent(body WebhookEvent) {
 		// Handle comment events
 		for _, change := range entry.Changes {
 			if change.Field == "feed" && change.Value.Item == "comment" {
+				// Extract sender information from From field (primary) or fallback fields
+				senderID := change.Value.SenderID
+				senderName := change.Value.SenderName
+
+				// Prefer From field if available (Facebook's primary structure)
+				if change.Value.From != nil {
+					if change.Value.From.ID != "" {
+						senderID = change.Value.From.ID
+					}
+					if change.Value.From.Name != "" {
+						senderName = change.Value.From.Name
+					}
+				}
+
+				// Log the extracted sender information
+				slog.Info("Extracted sender from webhook",
+					"commentID", change.Value.CommentID,
+					"senderID", senderID,
+					"senderName", senderName,
+					"hasFromField", change.Value.From != nil,
+				)
+
 				// Convert webhooks.ChangeValue to handlers.ChangeValue
 				handlerChange := handlers.ChangeValue{
 					Item:        change.Value.Item,
 					CommentID:   change.Value.CommentID,
 					PostID:      change.Value.PostID,
 					ParentID:    change.Value.ParentID,
-					SenderID:    change.Value.SenderID,
-					SenderName:  change.Value.SenderName,
+					SenderID:    senderID,
+					SenderName:  senderName,
 					Message:     change.Value.Message,
 					CreatedTime: change.Value.CreatedTime, // Already int64, no conversion needed
 				}
+
+				// Pass From field if available
+				if change.Value.From != nil {
+					handlerChange.From = &handlers.FacebookUser{
+						ID:   change.Value.From.ID,
+						Name: change.Value.From.Name,
+					}
+				}
+
 				// Process comment synchronously within this goroutine
 				handlers.HandleComment(handlerChange, pageID)
 			}

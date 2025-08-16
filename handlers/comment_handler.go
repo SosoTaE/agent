@@ -12,14 +12,21 @@ import (
 
 // ChangeValue represents the value of a change (moved from webhooks to avoid import cycle)
 type ChangeValue struct {
-	Item        string `json:"item"`
-	CommentID   string `json:"comment_id"`
-	PostID      string `json:"post_id"`
-	ParentID    string `json:"parent_id"`
-	SenderID    string `json:"sender_id"`
-	SenderName  string `json:"sender_name"`
-	Message     string `json:"message"`
-	CreatedTime int64  `json:"created_time"` // Unix timestamp
+	Item        string        `json:"item"`
+	CommentID   string        `json:"comment_id"`
+	PostID      string        `json:"post_id"`
+	ParentID    string        `json:"parent_id"`
+	SenderID    string        `json:"sender_id"`
+	SenderName  string        `json:"sender_name"`
+	From        *FacebookUser `json:"from,omitempty"` // User who made the comment
+	Message     string        `json:"message"`
+	CreatedTime int64         `json:"created_time"` // Unix timestamp
+}
+
+// FacebookUser represents a Facebook user in webhook payloads
+type FacebookUser struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
 }
 
 // HandleComment processes incoming comments and replies
@@ -33,6 +40,25 @@ func HandleComment(change ChangeValue, pageID string) {
 	senderID := change.SenderID
 	senderName := change.SenderName
 	message := change.Message
+
+	// Use From field if available (Facebook's preferred structure)
+	if change.From != nil {
+		if change.From.ID != "" {
+			senderID = change.From.ID
+		}
+		if change.From.Name != "" {
+			senderName = change.From.Name
+		}
+	}
+
+	// Check if we have a sender ID
+	if senderID == "" {
+		slog.Error("No sender ID found in webhook data",
+			"commentID", commentID,
+			"hasFromField", change.From != nil,
+		)
+		return
+	}
 
 	// CRITICAL: Check if the comment is from the page itself (the bot)
 	// This prevents the bot from replying to its own comments
@@ -102,6 +128,37 @@ func HandleComment(change ChangeValue, pageID string) {
 		"message", message,
 	)
 
+	// Fetch user details (first name and last name) from Facebook synchronously
+	var firstName, lastName string
+	userDetails, err := services.GetFacebookUserDetails(ctx, senderID, pageConfig.PageAccessToken)
+	if err != nil {
+		slog.Warn("Failed to fetch Facebook user details",
+			"senderID", senderID,
+			"error", err)
+		// Continue without first/last name if fetch fails
+	} else if userDetails != nil {
+		firstName = userDetails.FirstName
+		lastName = userDetails.LastName
+		// Update sender name if we have both names
+		if firstName != "" && lastName != "" {
+			senderName = fmt.Sprintf("%s %s", firstName, lastName)
+		}
+	}
+
+	// Also update existing records asynchronously
+	go func() {
+		updateCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		if firstName != "" || lastName != "" {
+			if err := services.UpdateUserNameInDatabase(updateCtx, senderID, firstName, lastName); err != nil {
+				slog.Warn("Failed to update user names in database",
+					"senderID", senderID,
+					"error", err)
+			}
+		}
+	}()
+
 	// Get post content for context
 	postContent, err := services.GetPostContent(ctx, postID, pageConfig.PageAccessToken)
 	if err != nil {
@@ -123,10 +180,10 @@ func HandleComment(change ChangeValue, pageID string) {
 		return
 	}
 
-	// Save the user's comment
-	err = services.SaveComment(
+	// Save the user's comment with first and last name
+	err = services.SaveCommentWithNames(
 		ctx, commentID, postID, parentID, postContent,
-		senderID, senderName, pageID, pageConfig.PageName,
+		senderID, senderName, firstName, lastName, pageID, pageConfig.PageName,
 		message, false, // isBot = false for user comments
 	)
 
@@ -164,9 +221,9 @@ func HandleComment(change ChangeValue, pageID string) {
 		"pageID", pageID,
 	)
 
-	// Fetch RAG context if enabled for this company
+	// Fetch RAG context if enabled for this page
 	var ragContext string
-	if len(company.CRMLinks) > 0 {
+	if len(pageConfig.CRMLinks) > 0 {
 		// Get relevant context based on the user's message, filtered by page ID
 		ragContext, err = services.GetRAGContext(ctx, message, company.CompanyID, pageID)
 		if err != nil {
@@ -196,7 +253,7 @@ func HandleComment(change ChangeValue, pageID string) {
 		messageType = "reply"
 	}
 
-	aiResponse, err := services.GetClaudeResponseWithRAG(ctx, contextStr, messageType, company, pageConfig, commentHistory, ragContext)
+	aiResponse, wantsAgent, err := services.GetClaudeResponseWithToolUse(ctx, contextStr, messageType, company, pageConfig, commentHistory, ragContext)
 	if err != nil {
 		slog.Error("Failed to get Claude response", "error", err)
 		if isReply {
@@ -204,6 +261,18 @@ func HandleComment(change ChangeValue, pageID string) {
 		} else {
 			aiResponse = "Thank you for your comment!"
 		}
+		wantsAgent = false
+	}
+
+	// Check if tool detected that customer wants to talk to a real person
+	if wantsAgent {
+		// For comments, we should inform them to send a direct message
+		aiResponse = aiResponse + "\n\nFor personal assistance, please send us a direct message and our team will help you."
+
+		slog.Info("Comment/Reply detected wanting real person assistance",
+			"commentID", commentID,
+			"senderID", senderID,
+			"pageID", pageID)
 	}
 
 	// Response delay removed for faster processing

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
@@ -25,10 +26,9 @@ func GetCompanyByPageID(ctx context.Context, pageID string) (*models.Company, er
 
 	collection := database.Collection("companies")
 
-	// Find company that has this page ID
+	// Find company document that contains this page ID in the pages array
 	filter := bson.M{
 		"pages.page_id": pageID,
-		"is_active":     true,
 	}
 
 	var company models.Company
@@ -47,8 +47,9 @@ func GetCompanyByPageID(ctx context.Context, pageID string) (*models.Company, er
 	return &company, nil
 }
 
-// GetPageConfig retrieves specific page configuration from company
+// GetPageConfig retrieves page configuration from company pages array
 func GetPageConfig(company *models.Company, pageID string) (*models.FacebookPage, error) {
+	// Find the page in the pages array
 	for _, page := range company.Pages {
 		if page.PageID == pageID && page.IsActive {
 			return &page, nil
@@ -57,13 +58,12 @@ func GetPageConfig(company *models.Company, pageID string) (*models.FacebookPage
 	return nil, fmt.Errorf("page %s not found or inactive in company configuration", pageID)
 }
 
-// GetCompanyByID retrieves company configuration by company ID
+// GetCompanyByID retrieves the company document with the given company ID
 func GetCompanyByID(ctx context.Context, companyID string) (*models.Company, error) {
 	collection := database.Collection("companies")
 
 	filter := bson.M{
 		"company_id": companyID,
-		"is_active":  true,
 	}
 
 	var company models.Company
@@ -75,11 +75,11 @@ func GetCompanyByID(ctx context.Context, companyID string) (*models.Company, err
 	return &company, nil
 }
 
-// GetAllCompanies retrieves all active companies
+// GetAllCompanies retrieves all company documents
 func GetAllCompanies(ctx context.Context) ([]models.Company, error) {
 	collection := database.Collection("companies")
 
-	filter := bson.M{"is_active": true}
+	filter := bson.M{}
 
 	cursor, err := collection.Find(ctx, filter)
 	if err != nil {
@@ -100,19 +100,65 @@ func GetAllActiveCompanies(ctx context.Context) ([]models.Company, error) {
 	return GetAllCompanies(ctx)
 }
 
+// GetCompaniesByCompanyID retrieves company by ID (single document with pages array)
+func GetCompaniesByCompanyID(ctx context.Context, companyID string) ([]models.Company, error) {
+	company, err := GetCompanyByID(ctx, companyID)
+	if err != nil {
+		return nil, err
+	}
+	return []models.Company{*company}, nil
+}
+
+// GetPagesByCompanyID retrieves all pages for a specific company ID
+func GetPagesByCompanyID(ctx context.Context, companyID string) ([]models.FacebookPage, error) {
+	company, err := GetCompanyByID(ctx, companyID)
+	if err != nil {
+		return nil, err
+	}
+
+	return company.Pages, nil
+}
+
+// GenerateCompanyID generates a unique company ID in the format: company_<name>_<timestamp>
+func GenerateCompanyID(companyName string) string {
+	// Convert company name to lowercase and replace spaces with underscores
+	sanitizedName := strings.ToLower(companyName)
+	sanitizedName = strings.ReplaceAll(sanitizedName, " ", "_")
+	// Remove any special characters, keeping only alphanumeric and underscores
+	var cleanName strings.Builder
+	for _, r := range sanitizedName {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' {
+			cleanName.WriteRune(r)
+		}
+	}
+
+	// Generate timestamp (Unix timestamp in seconds)
+	timestamp := time.Now().Unix()
+
+	// Create the company ID
+	return fmt.Sprintf("company_%s_%d", cleanName.String(), timestamp)
+}
+
 // CreateCompany creates a new company configuration
 func CreateCompany(ctx context.Context, company *models.Company) error {
 	collection := database.Collection("companies")
 
+	// Generate company ID if not provided
+	if company.CompanyID == "" {
+		company.CompanyID = GenerateCompanyID(company.CompanyName)
+	}
+
 	company.CreatedAt = time.Now()
 	company.UpdatedAt = time.Now()
 
-	// Set defaults if not provided
-	if company.ClaudeModel == "" {
-		company.ClaudeModel = "claude-3-haiku-20240307"
-	}
-	if company.MaxTokens == 0 {
-		company.MaxTokens = 1024
+	// Set defaults for each page if not provided
+	for i := range company.Pages {
+		if company.Pages[i].ClaudeModel == "" {
+			company.Pages[i].ClaudeModel = "claude-3-haiku-20240307"
+		}
+		if company.Pages[i].MaxTokens == 0 {
+			company.Pages[i].MaxTokens = 1024
+		}
 	}
 
 	_, err := collection.InsertOne(ctx, company)
@@ -120,13 +166,20 @@ func CreateCompany(ctx context.Context, company *models.Company) error {
 }
 
 // UpdateCompany updates an existing company configuration
-func UpdateCompany(ctx context.Context, companyID string, update bson.M) error {
+func UpdateCompany(ctx context.Context, companyID string, update interface{}) error {
 	collection := database.Collection("companies")
 
 	filter := bson.M{"company_id": companyID}
-	update["updated_at"] = time.Now()
 
-	_, err := collection.UpdateOne(ctx, filter, bson.M{"$set": update})
+	// Handle both $set and $push operations
+	var updateDoc bson.M
+	if m, ok := update.(bson.M); ok {
+		updateDoc = m
+	} else {
+		updateDoc = bson.M{"$set": update}
+	}
+
+	_, err := collection.UpdateOne(ctx, filter, updateDoc)
 
 	// Clear cache for all pages of this company
 	clearCompanyCache(companyID)

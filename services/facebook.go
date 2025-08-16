@@ -14,9 +14,17 @@ const fbGraphAPI = "https://graph.facebook.com/v18.0"
 
 // SendMessengerReply sends a reply message via Messenger
 func SendMessengerReply(ctx context.Context, recipientID, message, pageAccessToken string) error {
+	// Validate message is not empty
+	if message == "" {
+		slog.Warn("Attempted to send empty message to Facebook Messenger",
+			"recipientID", recipientID)
+		return fmt.Errorf("message cannot be empty")
+	}
+
 	url := fmt.Sprintf("%s/me/messages?access_token=%s", fbGraphAPI, pageAccessToken)
 
 	payload := map[string]interface{}{
+		"messaging_type": "RESPONSE",
 		"recipient": map[string]string{
 			"id": recipientID,
 		},
@@ -46,8 +54,25 @@ func SendMessengerReply(ctx context.Context, recipientID, message, pageAccessTok
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		slog.Error("Failed to send messenger reply", "status", resp.StatusCode, "body", string(body))
-		return fmt.Errorf("failed to send message: %s", resp.Status)
+		slog.Error("Failed to send messenger reply",
+			"status", resp.StatusCode,
+			"body", string(body),
+			"recipientID", recipientID)
+
+		// Parse Facebook error response
+		var fbError struct {
+			Error struct {
+				Message string `json:"message"`
+				Code    int    `json:"code"`
+				Type    string `json:"type"`
+			} `json:"error"`
+		}
+
+		if err := json.Unmarshal(body, &fbError); err == nil && fbError.Error.Message != "" {
+			return fmt.Errorf("Facebook API error (code %d): %s", fbError.Error.Code, fbError.Error.Message)
+		}
+
+		return fmt.Errorf("failed to send message: %s - Response: %s", resp.Status, string(body))
 	}
 
 	return nil
@@ -60,6 +85,13 @@ type CommentResponse struct {
 
 // ReplyToCommentWithResponse replies to a Facebook comment and returns the response
 func ReplyToCommentWithResponse(ctx context.Context, commentID, message, pageAccessToken string) (*CommentResponse, error) {
+	// Validate message is not empty
+	if message == "" {
+		slog.Warn("Attempted to send empty comment reply to Facebook",
+			"commentID", commentID)
+		return nil, fmt.Errorf("comment message cannot be empty")
+	}
+
 	url := fmt.Sprintf("%s/%s/comments?access_token=%s", fbGraphAPI, commentID, pageAccessToken)
 
 	payload := map[string]string{

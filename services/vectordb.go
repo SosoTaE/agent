@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"facebook-bot/models"
+
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -37,29 +39,48 @@ type SearchResult struct {
 }
 
 // GetEmbeddings generates embeddings for text using Voyage AI
-func GetEmbeddings(ctx context.Context, text string, companyID string) ([]float32, error) {
+func GetEmbeddings(ctx context.Context, text string, companyID string, pageID string) ([]float32, error) {
 	// Get company configuration
 	company, err := GetCompanyByID(ctx, companyID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get company config: %w", err)
 	}
 
+	// Find the page configuration
+	var pageConfig *models.FacebookPage
+	for _, page := range company.Pages {
+		if page.PageID == pageID {
+			pageConfig = &page
+			break
+		}
+	}
+
+	// If no pageID provided or page not found, use first page
+	if pageConfig == nil && len(company.Pages) > 0 {
+		pageConfig = &company.Pages[0]
+	}
+
+	if pageConfig == nil {
+		return nil, fmt.Errorf("no page configuration found")
+	}
+
 	// Check if Voyage is configured
-	if company.VoyageAPIKey == "" {
+	if pageConfig.VoyageAPIKey == "" {
 		slog.Warn("No Voyage API key configured, using mock embeddings",
 			"companyID", companyID,
+			"pageID", pageID,
 		)
 		mockEmbeddings := GetMockEmbeddings([]string{text})
 		return mockEmbeddings[0], nil
 	}
 
 	// Use Voyage embeddings
-	model := company.VoyageModel
+	model := pageConfig.VoyageModel
 	if model == "" {
 		model = "voyage-2" // Default Voyage model
 	}
 
-	embeddings, err := GetVoyageEmbeddings(ctx, []string{text}, company.VoyageAPIKey, model)
+	embeddings, err := GetVoyageEmbeddings(ctx, []string{text}, pageConfig.VoyageAPIKey, model)
 	if err != nil {
 		return nil, fmt.Errorf("Voyage embedding failed: %w", err)
 	}
@@ -96,7 +117,7 @@ func StoreEmbeddings(ctx context.Context, companyID, pageID, content, source str
 	collection := database.Collection("vector_documents")
 
 	// Generate embeddings using company's configured provider
-	embedding, err := GetEmbeddings(ctx, content, companyID)
+	embedding, err := GetEmbeddings(ctx, content, companyID, pageID)
 	if err != nil {
 		return fmt.Errorf("failed to generate embeddings: %w", err)
 	}
@@ -140,7 +161,7 @@ func SearchSimilarDocumentsByPage(ctx context.Context, query string, companyID s
 	collection := database.Collection("vector_documents")
 
 	// Generate query embedding using company's configured provider
-	queryEmbedding, err := GetEmbeddings(ctx, query, companyID)
+	queryEmbedding, err := GetEmbeddings(ctx, query, companyID, pageID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate query embedding: %w", err)
 	}
@@ -258,7 +279,8 @@ func SearchSimilarDocuments(ctx context.Context, query string, companyID string,
 	collection := database.Collection("vector_documents")
 
 	// Generate query embedding using company's configured provider
-	queryEmbedding, err := GetEmbeddings(ctx, query, companyID)
+	// Use empty pageID to get default page config
+	queryEmbedding, err := GetEmbeddings(ctx, query, companyID, "")
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate query embedding: %w", err)
 	}
