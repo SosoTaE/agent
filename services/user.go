@@ -2,10 +2,9 @@ package services
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
@@ -23,14 +22,13 @@ func CreateUser(ctx context.Context, user *models.User) error {
 	// Check if user already exists
 	existingUser := collection.FindOne(ctx, bson.M{
 		"$or": []bson.M{
-			{"user_id": user.UserID},
 			{"email": user.Email},
 			{"username": user.Username},
 		},
 	})
 
 	if existingUser.Err() != mongo.ErrNoDocuments {
-		return fmt.Errorf("user already exists with this user_id, email, or username")
+		return fmt.Errorf("user already exists with this email or username")
 	}
 
 	// Validate role
@@ -38,13 +36,13 @@ func CreateUser(ctx context.Context, user *models.User) error {
 		return fmt.Errorf("invalid role: %s", user.Role)
 	}
 
-	// Generate API key
-	if user.APIKey == "" {
-		apiKey, err := generateAPIKey()
+	// Hash password if it's not already hashed
+	if user.Password != "" && !strings.HasPrefix(user.Password, "$2a$") {
+		hashedPassword, err := HashPassword(user.Password)
 		if err != nil {
-			return fmt.Errorf("failed to generate API key: %w", err)
+			return fmt.Errorf("failed to hash password: %w", err)
 		}
-		user.APIKey = apiKey
+		user.Password = hashedPassword
 	}
 
 	// Set timestamps
@@ -59,7 +57,7 @@ func CreateUser(ctx context.Context, user *models.User) error {
 	}
 
 	slog.Info("User created successfully",
-		"userID", user.UserID,
+		"userID", user.ID.Hex(),
 		"username", user.Username,
 		"companyID", user.CompanyID,
 		"role", user.Role)
@@ -67,12 +65,17 @@ func CreateUser(ctx context.Context, user *models.User) error {
 	return nil
 }
 
-// GetUserByID retrieves a user by their user ID
+// GetUserByID retrieves a user by their ObjectID
 func GetUserByID(ctx context.Context, userID string) (*models.User, error) {
 	collection := database.Collection("users")
 
+	objectID, err := primitive.ObjectIDFromHex(userID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid user ID format: %w", err)
+	}
+
 	var user models.User
-	err := collection.FindOne(ctx, bson.M{"user_id": userID}).Decode(&user)
+	err = collection.FindOne(ctx, bson.M{"_id": objectID}).Decode(&user)
 	if err != nil {
 		if err == mongo.ErrNoDocuments {
 			return nil, fmt.Errorf("user not found")
@@ -83,7 +86,31 @@ func GetUserByID(ctx context.Context, userID string) (*models.User, error) {
 	return &user, nil
 }
 
-// GetUserByEmail retrieves a user by their email
+// GetUserByIDAndCompanyID retrieves a user by their ObjectID and company ID
+func GetUserByIDAndCompanyID(ctx context.Context, userID, companyID string) (*models.User, error) {
+	collection := database.Collection("users")
+
+	objectID, err := primitive.ObjectIDFromHex(userID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid user ID format: %w", err)
+	}
+
+	var user models.User
+	err = collection.FindOne(ctx, bson.M{
+		"_id":        objectID,
+		"company_id": companyID,
+	}).Decode(&user)
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			return nil, fmt.Errorf("user not found in company")
+		}
+		return nil, err
+	}
+
+	return &user, nil
+}
+
+// GetUserByEmail retrieves a user by their email (for backward compatibility)
 func GetUserByEmail(ctx context.Context, email string) (*models.User, error) {
 	collection := database.Collection("users")
 
@@ -99,18 +126,59 @@ func GetUserByEmail(ctx context.Context, email string) (*models.User, error) {
 	return &user, nil
 }
 
-// GetUserByAPIKey retrieves a user by their API key
-func GetUserByAPIKey(ctx context.Context, apiKey string) (*models.User, error) {
+// GetUserByEmailAndCompany retrieves a user by their email and company_id
+func GetUserByEmailAndCompany(ctx context.Context, email, companyID string) (*models.User, error) {
+	collection := database.Collection("users")
+	slog.Info("Searching for user",
+		"database", database.Name(),
+		"collection", "users",
+		"email", email,
+		"company_id", companyID)
+
+	var user models.User
+	err := collection.FindOne(ctx, bson.M{
+		"email":      email,
+		"company_id": companyID,
+	}).Decode(&user)
+
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			// Try to count users with this email across all companies
+			emailCount, _ := collection.CountDocuments(ctx, bson.M{"email": email})
+			// Count users in this company
+			companyCount, _ := collection.CountDocuments(ctx, bson.M{"company_id": companyID})
+
+			slog.Info("User not found",
+				"email", email,
+				"company_id", companyID,
+				"users_with_email", emailCount,
+				"users_in_company", companyCount)
+			return nil, fmt.Errorf("user not found in company")
+		}
+		return nil, err
+	}
+
+	slog.Info("User found",
+		"email", email,
+		"company_id", companyID,
+		"username", user.Username,
+		"has_password", user.Password != "")
+
+	return &user, nil
+}
+
+// GetUserByUsername retrieves a user by their username
+func GetUserByUsername(ctx context.Context, username string) (*models.User, error) {
 	collection := database.Collection("users")
 
 	var user models.User
 	err := collection.FindOne(ctx, bson.M{
-		"api_key":   apiKey,
+		"username":  username,
 		"is_active": true,
 	}).Decode(&user)
 	if err != nil {
 		if err == mongo.ErrNoDocuments {
-			return nil, fmt.Errorf("invalid API key")
+			return nil, fmt.Errorf("user not found")
 		}
 		return nil, err
 	}
@@ -162,6 +230,11 @@ func GetUsersByRole(ctx context.Context, companyID string, role models.UserRole)
 func UpdateUser(ctx context.Context, userID string, update bson.M) error {
 	collection := database.Collection("users")
 
+	objectID, err := primitive.ObjectIDFromHex(userID)
+	if err != nil {
+		return fmt.Errorf("invalid user ID format: %w", err)
+	}
+
 	// Add updated timestamp
 	update["updated_at"] = time.Now()
 
@@ -172,9 +245,21 @@ func UpdateUser(ctx context.Context, userID string, update bson.M) error {
 		}
 	}
 
+	// Hash password if it's being updated
+	if password, exists := update["password"]; exists {
+		passwordStr := password.(string)
+		if passwordStr != "" && !strings.HasPrefix(passwordStr, "$2a$") {
+			hashedPassword, err := HashPassword(passwordStr)
+			if err != nil {
+				return fmt.Errorf("failed to hash password: %w", err)
+			}
+			update["password"] = hashedPassword
+		}
+	}
+
 	result, err := collection.UpdateOne(
 		ctx,
-		bson.M{"user_id": userID},
+		bson.M{"_id": objectID},
 		bson.M{"$set": update},
 	)
 
@@ -195,43 +280,14 @@ func DeleteUser(ctx context.Context, userID string) error {
 	return UpdateUser(ctx, userID, bson.M{"is_active": false})
 }
 
-// AssignPagesToUser assigns specific pages to a bot manager
-func AssignPagesToUser(ctx context.Context, userID string, pageIDs []string) error {
-	collection := database.Collection("users")
-
-	// First, verify the user is a bot manager
-	var user models.User
-	err := collection.FindOne(ctx, bson.M{"user_id": userID}).Decode(&user)
-	if err != nil {
-		return fmt.Errorf("user not found: %w", err)
-	}
-
-	if user.Role != models.RoleBotManager {
-		return fmt.Errorf("user must be a bot manager to assign pages")
-	}
-
-	// Update assigned pages
-	return UpdateUser(ctx, userID, bson.M{"assigned_pages": pageIDs})
-}
-
 // UpdateLastLogin updates the user's last login time
 func UpdateLastLogin(ctx context.Context, userID string) error {
 	return UpdateUser(ctx, userID, bson.M{"last_login": time.Now()})
 }
 
-// RegenerateAPIKey generates a new API key for a user
-func RegenerateAPIKey(ctx context.Context, userID string) (string, error) {
-	apiKey, err := generateAPIKey()
-	if err != nil {
-		return "", err
-	}
-
-	err = UpdateUser(ctx, userID, bson.M{"api_key": apiKey})
-	if err != nil {
-		return "", err
-	}
-
-	return apiKey, nil
+// UpdateUserLastLogin is an alias for UpdateLastLogin
+func UpdateUserLastLogin(ctx context.Context, userID string) error {
+	return UpdateLastLogin(ctx, userID)
 }
 
 // HashPassword generates a bcrypt hash of the password
@@ -246,15 +302,6 @@ func CheckPasswordHash(password, hash string) bool {
 	return err == nil
 }
 
-// generateAPIKey generates a random API key
-func generateAPIKey() (string, error) {
-	bytes := make([]byte, 32)
-	if _, err := rand.Read(bytes); err != nil {
-		return "", err
-	}
-	return "sk_" + hex.EncodeToString(bytes), nil
-}
-
 // GetCompanyAdmins retrieves all company admins for a specific company
 func GetCompanyAdmins(ctx context.Context, companyID string) ([]models.User, error) {
 	return GetUsersByRole(ctx, companyID, models.RoleCompanyAdmin)
@@ -267,18 +314,9 @@ func GetBotManagers(ctx context.Context, companyID string) ([]models.User, error
 
 // CanUserManagePage checks if a user can manage a specific page
 func CanUserManagePage(user *models.User, pageID string) bool {
-	// Company admins can manage all pages
-	if user.Role == models.RoleCompanyAdmin {
+	// Company admins and bot managers can manage all pages in their company
+	if user.Role == models.RoleCompanyAdmin || user.Role == models.RoleBotManager {
 		return true
-	}
-
-	// Bot managers can only manage assigned pages
-	if user.Role == models.RoleBotManager {
-		for _, assignedPage := range user.AssignedPages {
-			if assignedPage == pageID {
-				return true
-			}
-		}
 	}
 
 	return false

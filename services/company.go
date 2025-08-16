@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
@@ -25,10 +26,10 @@ func GetCompanyByPageID(ctx context.Context, pageID string) (*models.Company, er
 
 	collection := database.Collection("companies")
 
-	// Find company that has this page ID
+	// Find company document with this page ID (now each document has a single page)
 	filter := bson.M{
-		"pages.page_id": pageID,
-		"is_active":     true,
+		"page_id":   pageID,
+		"is_active": true,
 	}
 
 	var company models.Company
@@ -47,17 +48,22 @@ func GetCompanyByPageID(ctx context.Context, pageID string) (*models.Company, er
 	return &company, nil
 }
 
-// GetPageConfig retrieves specific page configuration from company
+// GetPageConfig retrieves page configuration from company (now embedded in company document)
 func GetPageConfig(company *models.Company, pageID string) (*models.FacebookPage, error) {
-	for _, page := range company.Pages {
-		if page.PageID == pageID && page.IsActive {
-			return &page, nil
-		}
+	// Since each company document now represents a single page, we can directly return the page info
+	if company.PageID == pageID && company.IsActive {
+		return &models.FacebookPage{
+			PageID:          company.PageID,
+			PageName:        company.PageName,
+			PageAccessToken: company.PageAccessToken,
+			IsActive:        company.IsActive,
+		}, nil
 	}
 	return nil, fmt.Errorf("page %s not found or inactive in company configuration", pageID)
 }
 
-// GetCompanyByID retrieves company configuration by company ID
+// GetCompanyByID retrieves the first active company document with the given company ID
+// Note: With the new structure, there may be multiple documents per company (one per page)
 func GetCompanyByID(ctx context.Context, companyID string) (*models.Company, error) {
 	collection := database.Collection("companies")
 
@@ -75,7 +81,7 @@ func GetCompanyByID(ctx context.Context, companyID string) (*models.Company, err
 	return &company, nil
 }
 
-// GetAllCompanies retrieves all active companies
+// GetAllCompanies retrieves all active company documents (now includes all pages)
 func GetAllCompanies(ctx context.Context) ([]models.Company, error) {
 	collection := database.Collection("companies")
 
@@ -100,9 +106,77 @@ func GetAllActiveCompanies(ctx context.Context) ([]models.Company, error) {
 	return GetAllCompanies(ctx)
 }
 
+// GetCompaniesByCompanyID retrieves all company documents (pages) for a specific company ID
+func GetCompaniesByCompanyID(ctx context.Context, companyID string) ([]models.Company, error) {
+	collection := database.Collection("companies")
+
+	filter := bson.M{
+		"company_id": companyID,
+		"is_active":  true,
+	}
+
+	cursor, err := collection.Find(ctx, filter)
+	if err != nil {
+		return nil, err
+	}
+	defer cursor.Close(ctx)
+
+	var companies []models.Company
+	if err = cursor.All(ctx, &companies); err != nil {
+		return nil, err
+	}
+
+	return companies, nil
+}
+
+// GetPagesByCompanyID retrieves all pages for a specific company ID
+func GetPagesByCompanyID(ctx context.Context, companyID string) ([]models.FacebookPage, error) {
+	companies, err := GetCompaniesByCompanyID(ctx, companyID)
+	if err != nil {
+		return nil, err
+	}
+
+	pages := make([]models.FacebookPage, 0, len(companies))
+	for _, company := range companies {
+		pages = append(pages, models.FacebookPage{
+			PageID:          company.PageID,
+			PageName:        company.PageName,
+			PageAccessToken: company.PageAccessToken,
+			IsActive:        company.IsActive,
+		})
+	}
+
+	return pages, nil
+}
+
+// GenerateCompanyID generates a unique company ID in the format: company_<name>_<timestamp>
+func GenerateCompanyID(companyName string) string {
+	// Convert company name to lowercase and replace spaces with underscores
+	sanitizedName := strings.ToLower(companyName)
+	sanitizedName = strings.ReplaceAll(sanitizedName, " ", "_")
+	// Remove any special characters, keeping only alphanumeric and underscores
+	var cleanName strings.Builder
+	for _, r := range sanitizedName {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' {
+			cleanName.WriteRune(r)
+		}
+	}
+
+	// Generate timestamp (Unix timestamp in seconds)
+	timestamp := time.Now().Unix()
+
+	// Create the company ID
+	return fmt.Sprintf("company_%s_%d", cleanName.String(), timestamp)
+}
+
 // CreateCompany creates a new company configuration
 func CreateCompany(ctx context.Context, company *models.Company) error {
 	collection := database.Collection("companies")
+
+	// Generate company ID if not provided
+	if company.CompanyID == "" {
+		company.CompanyID = GenerateCompanyID(company.CompanyName)
+	}
 
 	company.CreatedAt = time.Now()
 	company.UpdatedAt = time.Now()

@@ -6,15 +6,19 @@ import (
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
-// Company represents a company/client configuration
+// Company represents a company/client configuration with a single page
 type Company struct {
 	ID          primitive.ObjectID `bson:"_id,omitempty" json:"id"`
 	CompanyID   string             `bson:"company_id" json:"company_id"`
 	CompanyName string             `bson:"company_name" json:"company_name"`
 
-	// Facebook Configuration
-	Pages     []FacebookPage `bson:"pages" json:"pages"`
-	AppSecret string         `bson:"app_secret" json:"app_secret"`
+	// Facebook Page Configuration (single page per document)
+	PageID          string `bson:"page_id" json:"page_id"`
+	PageName        string `bson:"page_name" json:"page_name"`
+	PageAccessToken string `bson:"page_access_token" json:"page_access_token"`
+
+	// Facebook App Configuration
+	AppSecret string `bson:"app_secret" json:"app_secret"`
 
 	// Claude AI Configuration
 	ClaudeAPIKey string `bson:"claude_api_key" json:"claude_api_key"`

@@ -18,13 +18,11 @@ func InitializeCRMData(ctx context.Context) error {
 		return fmt.Errorf("failed to get companies: %w", err)
 	}
 
-	// Create a map of pageID to companyID
+	// Create a map of pageID to companyID (now each company doc has one page)
 	pageToCompany := make(map[string]string)
 	for _, company := range companies {
-		for _, page := range company.Pages {
-			if page.IsActive {
-				pageToCompany[page.PageID] = company.CompanyID
-			}
+		if company.IsActive {
+			pageToCompany[company.PageID] = company.CompanyID
 		}
 	}
 
@@ -84,13 +82,11 @@ func StartCRMUpdateScheduler(ctx context.Context) {
 		return
 	}
 
-	// Create a map of pageID to companyID
+	// Create a map of pageID to companyID (now each company doc has one page)
 	pageToCompany := make(map[string]string)
 	for _, company := range companies {
-		for _, page := range company.Pages {
-			if page.IsActive {
-				pageToCompany[page.PageID] = company.CompanyID
-			}
+		if company.IsActive {
+			pageToCompany[company.PageID] = company.CompanyID
 		}
 	}
 

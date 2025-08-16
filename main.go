@@ -6,13 +6,16 @@ import (
 	"os"
 	"time"
 
+	"github.com/gofiber/contrib/websocket"
 	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v2/middleware/cors"
 	"github.com/gofiber/fiber/v2/middleware/logger"
 	"github.com/gofiber/fiber/v2/middleware/recover"
 	"github.com/joho/godotenv"
 
 	"facebook-bot/config"
 	"facebook-bot/handlers"
+	"facebook-bot/middleware"
 	"facebook-bot/services"
 	"facebook-bot/webhooks"
 )
@@ -53,6 +56,15 @@ func main() {
 	// Initialize services
 	services.InitServices(db, cfg.DatabaseName)
 
+	// Initialize session store for authentication
+	services.InitSession()
+
+	// Create indexes for customers collection
+	if err := services.CreateIndexesForCustomers(ctx); err != nil {
+		slog.Error("Failed to create customer indexes", "error", err)
+		// Continue anyway - the app can still work without indexes
+	}
+
 	// Initialize vector database
 	if err := services.InitVectorDB(ctx); err != nil {
 		slog.Error("Failed to initialize vector DB", "error", err)
@@ -87,6 +99,17 @@ func main() {
 
 	// Middleware
 	app.Use(recover.New())
+
+	// CORS configuration - Allow frontend development server
+	app.Use(cors.New(cors.Config{
+		AllowOrigins:     "http://localhost:5173, http://localhost:3000, http://localhost:5174",
+		AllowMethods:     "GET,POST,PUT,DELETE,OPTIONS,PATCH",
+		AllowHeaders:     "Origin, Content-Type, Accept, Authorization, X-Requested-With",
+		AllowCredentials: true,
+		ExposeHeaders:    "Content-Length, Content-Type, X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset",
+		MaxAge:           86400, // 24 hours
+	}))
+
 	app.Use(logger.New(logger.Config{
 		Format: "[${time}] ${status} - ${method} ${path}\n",
 	}))
@@ -94,42 +117,80 @@ func main() {
 	// Register webhook routes
 	webhooks.RegisterRoutes(app, cfg)
 
-	// Register admin routes (for testing)
-	admin := app.Group("/admin")
+	auth := app.Group("/auth")
+	auth.Post("/login", handlers.Login)
+	auth.Post("/logout", handlers.Logout)
+	auth.Get("/me", handlers.GetCurrentUser)
+	auth.Get("/check", handlers.CheckSession)
 
-	// Company management endpoints
-	admin.Post("/companies", handlers.CreateCompany)
-	admin.Get("/companies/:companyID", handlers.GetCompany)
-	admin.Post("/companies/:companyID/pages", handlers.AddPageToCompany)
+	// Register admin routes (protected)
+	admin := app.Group("/admin", middleware.RequireAuth)
 
-	// Voyage embedding configuration endpoints
-	admin.Put("/companies/:companyID/voyage", handlers.UpdateVoyageConfig)
-	admin.Post("/companies/:companyID/voyage/test", handlers.TestVoyageEmbedding)
-	admin.Post("/companies/:companyID/reindex", handlers.ReindexDocuments)
+	// Company management endpoints (all users can view company info)
+	admin.Get("/company", handlers.GetCompany)
 
-	// Keep old endpoints for backward compatibility
-	admin.Put("/companies/:companyID/embedding", handlers.UpdateEmbeddingConfig)
-	admin.Post("/companies/:companyID/embedding/test", handlers.TestEmbedding)
+	// Super admin endpoint to create new companies (requires special privileges)
+	admin.Post("/company", handlers.CreateCompany) // TODO: Add super admin middleware when needed
 
-	// RAG debugging endpoints
-	admin.Post("/companies/:companyID/rag/test", handlers.TestRAGRetrieval)
-	admin.Get("/companies/:companyID/documents", handlers.GetStoredDocuments)
+	// Company admin only endpoints
+	admin.Post("/company/pages", middleware.RequireCompanyAdmin, handlers.AddPageToCompany)
+	admin.Post("/users", middleware.RequireCompanyAdmin, handlers.CreateUser)
+	admin.Put("/users/:userID/role", middleware.RequireCompanyAdmin, handlers.UpdateUserRole)
 
-	// User management endpoints
-	admin.Post("/users", handlers.CreateUser)
+	// User viewing endpoints (all authenticated users)
+	admin.Get("/users", handlers.GetCompanyUsers)
 	admin.Get("/users/:userID", handlers.GetUser)
-	admin.Get("/companies/:companyID/users", handlers.GetCompanyUsers)
-	admin.Put("/users/:userID/role", handlers.UpdateUserRole)
-	admin.Post("/users/:userID/regenerate-api-key", handlers.RegenerateUserAPIKey)
 
-	// Utility endpoints
-	admin.Post("/test-webhook", handlers.TestWebhookConnection)
-	admin.Get("/roles", handlers.GetRolePermissions)
+	// Dashboard API endpoints (protected)
+	dashboard := app.Group("/api/dashboard", middleware.RequireAuth, middleware.ExtractCompanyPages)
 
-	// Testing endpoints (simplified)
-	test := app.Group("/test")
-	test.Post("/add-user", handlers.TestCreateUser)
-	test.Post("/add-company", handlers.TestCreateCompany)
+	// get pages which are registered in company
+	dashboard.Get("/pages", handlers.GetCompanyPages)
+	dashboard.Get("/comments/post/:postID", middleware.ValidatePostAccess, handlers.GetPostComments)
+	dashboard.Get("/comments/post/:postID/hierarchical", middleware.ValidatePostAccess, handlers.GetPostCommentsHandler) // New hierarchical endpoint
+	dashboard.Get("/comments/:commentID/replies", handlers.GetCommentWithRepliesHandler)                                 // Get specific comment with replies
+	dashboard.Get("/comments/post/:postID/threaded", middleware.ValidatePostAccess, handlers.GetThreadedCommentsHandler) // Get threaded view
+	dashboard.Get("/comments", handlers.GetCompanyComments)
+	dashboard.Get("/stats", handlers.GetCommentStats)
+	dashboard.Get("/name-changes", handlers.GetNameChanges)
+	dashboard.Get("/sender/:senderID/history", handlers.GetSenderHistory)
+	dashboard.Get("/conversations", handlers.GetUserConversations)
+	dashboard.Get("/messages/:senderID", handlers.GetUserMessages)
+	dashboard.Get("/messages", handlers.GetChatMessages)                                  // Get all messages with pagination and filtering
+	dashboard.Get("/messages/page/:pageID", handlers.GetAllMessagesByPage)                // Get all messages for a page
+	dashboard.Get("/messages/page/:pageID/conversations", handlers.GetPageConversations)  // Get all conversations for a page
+	dashboard.Get("/messages/page/:pageID/chats", handlers.GetChatIDs)                    // Get all chat IDs for a page
+	dashboard.Get("/messages/chat/:chatID", handlers.GetMessagesByChatID)                 // Get messages by chat ID
+	dashboard.Get("/messages/conversation/:customerID", handlers.GetCustomerConversation) // Get customer conversation with bot
+
+	// Customer endpoints
+	dashboard.Get("/customers", handlers.GetCustomers)                                      // Get customers list
+	dashboard.Get("/customers/:customerID", handlers.GetCustomerDetails)                    // Get specific customer
+	dashboard.Get("/customers/search", handlers.SearchCustomers)                            // Search customers
+	dashboard.Get("/customers/stats", handlers.GetCustomerStats)                            // Get customer statistics
+	dashboard.Put("/customers/:customerID/stop", handlers.UpdateCustomerStopStatus)         // Update customer stop status
+	dashboard.Post("/customers/:customerID/toggle-stop", handlers.ToggleCustomerStopStatus) // Toggle customer stop status
+	dashboard.Post("/customers/:customerID/message", handlers.SendMessageToCustomer)        // Send message to customer
+
+	dashboard.Get("/posts", handlers.GetPostsList)
+	dashboard.Get("/posts/company", handlers.GetPostIDsByCompanyHandler) // Get posts for company
+
+	// WebSocket endpoint (requires authentication)
+	dashboard.Get("/ws", handlers.WebSocketUpgrade, websocket.New(handlers.HandleWebSocket))
+
+	// Public API endpoints (no auth required)
+	api := app.Group("/api")
+
+	// Comments endpoints
+	api.Get("/comments/post/:postID", handlers.GetPostCommentsHandler)            // Public endpoint for hierarchical comments
+	api.Get("/comments/:commentID", handlers.GetCommentWithRepliesHandler)        // Public endpoint for single comment with replies
+	api.Get("/comments/post/:postID/debug", handlers.GetPostCommentsDebugHandler) // Debug endpoint
+
+	// Posts endpoints
+	api.Get("/posts", handlers.GetAllPostIDsHandler)                 // Get all post IDs
+	api.Get("/posts/paginated", handlers.GetPostIDsPaginatedHandler) // Get paginated posts
+	api.Get("/posts/page/:pageID", handlers.GetPostIDsByPageHandler) // Get posts by page
+	api.Get("/posts/stats", handlers.GetPostsStatsHandler)           // Get posts statistics
 
 	// Health check
 	app.Get("/health", func(c *fiber.Ctx) error {

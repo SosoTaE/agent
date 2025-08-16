@@ -70,12 +70,12 @@ func TestRAGRetrieval(c *fiber.Ctx) error {
 			})
 		}
 
-		// For backward compatibility, create a wrapper that uses empty page ID
-		if len(company.Pages) > 0 {
-			// Use first page as default
-			ragContext, err = services.GetRAGContext(ctx, req.Query, companyID, company.Pages[0].PageID)
+		// For backward compatibility, use the current company document's page
+		if company.PageID != "" {
+			// Use the company's page
+			ragContext, err = services.GetRAGContext(ctx, req.Query, companyID, company.PageID)
 		} else {
-			ragContext = "No pages configured for this company"
+			ragContext = "No page configured for this company document"
 		}
 	}
 

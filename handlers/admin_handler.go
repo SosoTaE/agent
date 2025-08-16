@@ -5,38 +5,12 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/gofiber/fiber/v2"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
-
 	"facebook-bot/models"
 	"facebook-bot/services"
+
+	"github.com/gofiber/fiber/v2"
+	"go.mongodb.org/mongo-driver/bson"
 )
-
-// CreateCompanyRequest represents the request body for creating a company
-type CreateCompanyRequest struct {
-	CompanyID     string           `json:"company_id" validate:"required"`
-	CompanyName   string           `json:"company_name" validate:"required"`
-	Pages         []PageRequest    `json:"pages" validate:"required,min=1"`
-	AppSecret     string           `json:"app_secret" validate:"required"`
-	ClaudeAPIKey  string           `json:"claude_api_key" validate:"required"`
-	ClaudeModel   string           `json:"claude_model,omitempty"`
-	SystemPrompt  string           `json:"system_prompt,omitempty"`
-	MaxTokens     int              `json:"max_tokens,omitempty"`
-	ResponseDelay int              `json:"response_delay,omitempty"`
-	CRMLinks      []models.CRMLink `json:"crm_links,omitempty"`
-}
-
-// QuickCreateCompanyRequest represents a simplified request for quick company setup
-type QuickCreateCompanyRequest struct {
-	CompanyName     string           `json:"company_name" validate:"required"`
-	PageID          string           `json:"page_id" validate:"required"`
-	PageAccessToken string           `json:"page_access_token" validate:"required"`
-	AppSecret       string           `json:"app_secret" validate:"required"`
-	AIAPIKey        string           `json:"ai_api_key" validate:"required"`
-	SystemPrompt    string           `json:"system_prompt,omitempty"`
-	CRMLinks        []models.CRMLink `json:"crm_links,omitempty"`
-}
 
 // PageRequest represents a Facebook page in the request
 type PageRequest struct {
@@ -46,93 +20,32 @@ type PageRequest struct {
 	IsActive        bool   `json:"is_active"`
 }
 
-// CreateUserRequest represents the request body for creating a user
-type CreateUserRequest struct {
-	UserID        string   `json:"user_id" validate:"required"`
-	Username      string   `json:"username" validate:"required"`
-	Email         string   `json:"email" validate:"required,email"`
-	FullName      string   `json:"full_name" validate:"required"`
-	CompanyID     string   `json:"company_id" validate:"required"`
-	CompanyName   string   `json:"company_name" validate:"required"`
-	Role          string   `json:"role" validate:"required"`
-	Password      string   `json:"password,omitempty"`
-	AssignedPages []string `json:"assigned_pages,omitempty"`
-}
-
-// CreateCompany handles the creation of a new company
-func CreateCompany(c *fiber.Ctx) error {
-	var req CreateCompanyRequest
-
-	// Parse request body
-	if err := c.BodyParser(&req); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error":   "Invalid request body",
-			"details": err.Error(),
-		})
-	}
-
-	// Convert request to model
-	company := &models.Company{
-		ID:            primitive.NewObjectID(),
-		CompanyID:     req.CompanyID,
-		CompanyName:   req.CompanyName,
-		AppSecret:     req.AppSecret,
-		ClaudeAPIKey:  req.ClaudeAPIKey,
-		ClaudeModel:   req.ClaudeModel,
-		SystemPrompt:  req.SystemPrompt,
-		IsActive:      true,
-		MaxTokens:     req.MaxTokens,
-		ResponseDelay: req.ResponseDelay,
-		CreatedAt:     time.Now(),
-		UpdatedAt:     time.Now(),
-	}
-
-	// Set defaults
-	if company.ClaudeModel == "" {
-		company.ClaudeModel = "claude-3-haiku-20240307"
-	}
-	if company.MaxTokens == 0 {
-		company.MaxTokens = 1024
-	}
-
-	// Convert pages
-	company.Pages = make([]models.FacebookPage, len(req.Pages))
-	for i, page := range req.Pages {
-		company.Pages[i] = models.FacebookPage{
-			PageID:          page.PageID,
-			PageName:        page.PageName,
-			PageAccessToken: page.PageAccessToken,
-			IsActive:        page.IsActive,
-		}
-	}
-
-	// Create context with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	// Save to database
-	if err := services.CreateCompany(ctx, company); err != nil {
-		slog.Error("Failed to create company", "error", err)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error":   "Failed to create company",
-			"details": err.Error(),
-		})
-	}
-
-	slog.Info("Company created successfully",
-		"companyID", company.CompanyID,
-		"companyName", company.CompanyName,
-		"pageCount", len(company.Pages))
-
-	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
-		"message": "Company created successfully",
-		"company": company,
-	})
-}
-
 // CreateUser handles the creation of a new user
 func CreateUser(c *fiber.Ctx) error {
-	var req CreateUserRequest
+	// Get company_id and role from session
+	companyID := c.Locals("company_id")
+	if companyID == nil {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+			"error": "Company ID not found in session",
+		})
+	}
+
+	// Only company admin can create users
+	userRole := c.Locals("role")
+	if userRole != string(models.RoleCompanyAdmin) {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+			"error": "Only company admins can create users",
+		})
+	}
+
+	var req struct {
+		Username  string `json:"username" validate:"required"`
+		Email     string `json:"email" validate:"required,email"`
+		Password  string `json:"password" validate:"required"`
+		FirstName string `json:"first_name" validate:"required"`
+		LastName  string `json:"last_name" validate:"required"`
+		Role      string `json:"role" validate:"required"`
+	}
 
 	// Parse request body
 	if err := c.BodyParser(&req); err != nil {
@@ -157,28 +70,15 @@ func CreateUser(c *fiber.Ctx) error {
 		})
 	}
 
-	// Convert request to model
+	// Convert request to model - use company_id from session
 	user := &models.User{
-		UserID:        req.UserID,
-		Username:      req.Username,
-		Email:         req.Email,
-		FullName:      req.FullName,
-		CompanyID:     req.CompanyID,
-		CompanyName:   req.CompanyName,
-		Role:          models.UserRole(req.Role),
-		AssignedPages: req.AssignedPages,
-	}
-
-	// Hash password if provided
-	if req.Password != "" {
-		hashedPassword, err := services.HashPassword(req.Password)
-		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-				"error":   "Failed to hash password",
-				"details": err.Error(),
-			})
-		}
-		user.PasswordHash = hashedPassword
+		Username:  req.Username,
+		Email:     req.Email,
+		Password:  req.Password, // Will be hashed in CreateUser
+		FirstName: req.FirstName,
+		LastName:  req.LastName,
+		CompanyID: companyID.(string), // Use company_id from session
+		Role:      models.UserRole(req.Role),
 	}
 
 	// Create context with timeout
@@ -195,7 +95,7 @@ func CreateUser(c *fiber.Ctx) error {
 	}
 
 	slog.Info("User created successfully",
-		"userID", user.UserID,
+		"userID", user.ID.Hex(),
 		"username", user.Username,
 		"companyID", user.CompanyID,
 		"role", user.Role)
@@ -203,15 +103,13 @@ func CreateUser(c *fiber.Ctx) error {
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
 		"message": "User created successfully",
 		"user": fiber.Map{
-			"user_id":        user.UserID,
-			"username":       user.Username,
-			"email":          user.Email,
-			"full_name":      user.FullName,
-			"company_id":     user.CompanyID,
-			"company_name":   user.CompanyName,
-			"role":           user.Role,
-			"api_key":        user.APIKey,
-			"assigned_pages": user.AssignedPages,
+			"id":         user.ID.Hex(),
+			"username":   user.Username,
+			"email":      user.Email,
+			"first_name": user.FirstName,
+			"last_name":  user.LastName,
+			"company_id": user.CompanyID,
+			"role":       user.Role,
 		},
 	})
 }
@@ -225,10 +123,19 @@ func GetUser(c *fiber.Ctx) error {
 		})
 	}
 
+	// Get company_id from session
+	companyID := c.Locals("company_id")
+
+	if companyID == nil {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+			"error": "Company ID not found in session",
+		})
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	user, err := services.GetUserByID(ctx, userID)
+	user, err := services.GetUserByIDAndCompanyID(ctx, userID, companyID.(string))
 	if err != nil {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
 			"error":   "User not found",
@@ -239,19 +146,20 @@ func GetUser(c *fiber.Ctx) error {
 	return c.JSON(user)
 }
 
-// GetCompanyUsers retrieves all users for a company
+// GetCompanyUsers retrieves all users for the authenticated user's company
 func GetCompanyUsers(c *fiber.Ctx) error {
-	companyID := c.Params("companyID")
-	if companyID == "" {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": "Company ID is required",
+	// Get company_id from session
+	companyID := c.Locals("company_id")
+	if companyID == nil {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+			"error": "Company ID not found in session",
 		})
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	users, err := services.GetUsersByCompany(ctx, companyID)
+	users, err := services.GetUsersByCompany(ctx, companyID.(string))
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error":   "Failed to retrieve users",
@@ -263,19 +171,19 @@ func GetCompanyUsers(c *fiber.Ctx) error {
 	usersByRole := make(map[string][]fiber.Map)
 	for _, user := range users {
 		userInfo := fiber.Map{
-			"user_id":        user.UserID,
-			"username":       user.Username,
-			"email":          user.Email,
-			"full_name":      user.FullName,
-			"is_active":      user.IsActive,
-			"last_login":     user.LastLogin,
-			"assigned_pages": user.AssignedPages,
+			"id":         user.ID.Hex(),
+			"username":   user.Username,
+			"email":      user.Email,
+			"first_name": user.FirstName,
+			"last_name":  user.LastName,
+			"is_active":  user.IsActive,
+			"last_login": user.LastLogin,
 		}
 		usersByRole[string(user.Role)] = append(usersByRole[string(user.Role)], userInfo)
 	}
 
 	return c.JSON(fiber.Map{
-		"company_id":    companyID,
+		"company_id":    companyID.(string),
 		"total_users":   len(users),
 		"users_by_role": usersByRole,
 	})
@@ -290,9 +198,24 @@ func UpdateUserRole(c *fiber.Ctx) error {
 		})
 	}
 
+	// Get company_id and role from session
+	companyID := c.Locals("company_id")
+	if companyID == nil {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+			"error": "Company ID not found in session",
+		})
+	}
+
+	// Only company admin can update roles
+	userRole := c.Locals("role")
+	if userRole != string(models.RoleCompanyAdmin) {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+			"error": "Only company admins can update user roles",
+		})
+	}
+
 	var req struct {
-		Role          string   `json:"role" validate:"required"`
-		AssignedPages []string `json:"assigned_pages,omitempty"`
+		Role string `json:"role" validate:"required"`
 	}
 
 	if err := c.BodyParser(&req); err != nil {
@@ -319,10 +242,15 @@ func UpdateUserRole(c *fiber.Ctx) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	update := bson.M{"role": req.Role}
-	if req.Role == string(models.RoleBotManager) && len(req.AssignedPages) > 0 {
-		update["assigned_pages"] = req.AssignedPages
+	// Verify the user belongs to the same company before updating
+	_, err := services.GetUserByIDAndCompanyID(ctx, userID, companyID.(string))
+	if err != nil {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+			"error": "User not found in your company",
+		})
 	}
+
+	update := bson.M{"role": req.Role}
 
 	if err := services.UpdateUser(ctx, userID, update); err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
@@ -340,41 +268,104 @@ func UpdateUserRole(c *fiber.Ctx) error {
 	})
 }
 
-// RegenerateUserAPIKey regenerates a user's API key
+// RegenerateUserAPIKey is deprecated - API keys are no longer used
 func RegenerateUserAPIKey(c *fiber.Ctx) error {
-	userID := c.Params("userID")
-	if userID == "" {
+	return c.Status(fiber.StatusGone).JSON(fiber.Map{
+		"error": "API key functionality has been removed. Please use session-based authentication.",
+	})
+}
+
+// CreateCompanyRequest represents the request body for creating a new company
+type CreateCompanyRequest struct {
+	CompanyName     string `json:"company_name" validate:"required"`
+	PageID          string `json:"page_id" validate:"required"`
+	PageName        string `json:"page_name" validate:"required"`
+	PageAccessToken string `json:"page_access_token" validate:"required"`
+	AppSecret       string `json:"app_secret" validate:"required"`
+	ClaudeAPIKey    string `json:"claude_api_key" validate:"required"`
+	ClaudeModel     string `json:"claude_model,omitempty"`
+	VoyageAPIKey    string `json:"voyage_api_key,omitempty"`
+	VoyageModel     string `json:"voyage_model,omitempty"`
+	SystemPrompt    string `json:"system_prompt,omitempty"`
+	MaxTokens       int    `json:"max_tokens,omitempty"`
+	ResponseDelay   int    `json:"response_delay,omitempty"`
+	DefaultLanguage string `json:"default_language,omitempty"`
+}
+
+// CreateCompany handles creating a new company with its first page
+func CreateCompany(c *fiber.Ctx) error {
+	var req CreateCompanyRequest
+	if err := c.BodyParser(&req); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": "User ID is required",
+			"error":   "Invalid request body",
+			"details": err.Error(),
 		})
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	newAPIKey, err := services.RegenerateAPIKey(ctx, userID)
-	if err != nil {
+	// Create new company document with auto-generated ID
+	newCompany := &models.Company{
+		CompanyName:     req.CompanyName,
+		PageID:          req.PageID,
+		PageName:        req.PageName,
+		PageAccessToken: req.PageAccessToken,
+		AppSecret:       req.AppSecret,
+		ClaudeAPIKey:    req.ClaudeAPIKey,
+		ClaudeModel:     req.ClaudeModel,
+		VoyageAPIKey:    req.VoyageAPIKey,
+		VoyageModel:     req.VoyageModel,
+		SystemPrompt:    req.SystemPrompt,
+		IsActive:        true,
+		MaxTokens:       req.MaxTokens,
+		ResponseDelay:   req.ResponseDelay,
+		DefaultLanguage: req.DefaultLanguage,
+	}
+
+	// The company ID will be auto-generated in CreateCompany service
+	if err := services.CreateCompany(ctx, newCompany); err != nil {
+		slog.Error("Failed to create company", "error", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error":   "Failed to regenerate API key",
+			"error":   "Failed to create company",
 			"details": err.Error(),
 		})
 	}
 
-	slog.Info("API key regenerated", "userID", userID)
+	slog.Info("Company created successfully",
+		"companyID", newCompany.CompanyID,
+		"companyName", req.CompanyName,
+		"pageID", req.PageID)
 
+	// Return the generated company ID
 	return c.JSON(fiber.Map{
-		"message":     "API key regenerated successfully",
-		"user_id":     userID,
-		"new_api_key": newAPIKey,
+		"message":    "Company created successfully",
+		"company_id": newCompany.CompanyID,
+		"company": fiber.Map{
+			"company_id":   newCompany.CompanyID,
+			"company_name": req.CompanyName,
+			"page_id":      req.PageID,
+			"page_name":    req.PageName,
+		},
 	})
 }
 
-// AddPageToCompany handles adding a new page to an existing company
+// AddPageToCompany handles adding a new page to the authenticated user's company
+// With the new structure, this creates a new company document for the page
 func AddPageToCompany(c *fiber.Ctx) error {
-	companyID := c.Params("companyID")
-	if companyID == "" {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": "Company ID is required",
+	// Get company_id and role from session
+	companyID := c.Locals("company_id")
+	if companyID == nil {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+			"error": "Company ID not found in session",
+		})
+	}
+
+	// Only company admin can add pages
+	userRole := c.Locals("role")
+	if userRole != string(models.RoleCompanyAdmin) {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+			"error": "Only company admins can add pages",
 		})
 	}
 
@@ -389,8 +380,8 @@ func AddPageToCompany(c *fiber.Ctx) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Get existing company
-	company, err := services.GetCompanyByID(ctx, companyID)
+	// Get one existing company document to copy settings from
+	existingCompany, err := services.GetCompanyByID(ctx, companyID.(string))
 	if err != nil {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
 			"error":   "Company not found",
@@ -398,32 +389,42 @@ func AddPageToCompany(c *fiber.Ctx) error {
 		})
 	}
 
-	// Check if page already exists
-	for _, existingPage := range company.Pages {
-		if existingPage.PageID == page.PageID {
-			return c.Status(fiber.StatusConflict).JSON(fiber.Map{
-				"error": "Page already exists for this company",
-			})
+	// Check if page already exists for this company
+	existingPages, err := services.GetPagesByCompanyID(ctx, companyID.(string))
+	if err == nil {
+		for _, existingPage := range existingPages {
+			if existingPage.PageID == page.PageID {
+				return c.Status(fiber.StatusConflict).JSON(fiber.Map{
+					"error": "Page already exists for this company",
+				})
+			}
 		}
 	}
 
-	// Add new page
-	newPage := models.FacebookPage{
+	// Create new company document for this page
+	newCompanyDoc := &models.Company{
+		CompanyID:       existingCompany.CompanyID,
+		CompanyName:     existingCompany.CompanyName,
 		PageID:          page.PageID,
 		PageName:        page.PageName,
 		PageAccessToken: page.PageAccessToken,
+		AppSecret:       existingCompany.AppSecret,
+		ClaudeAPIKey:    existingCompany.ClaudeAPIKey,
+		ClaudeModel:     existingCompany.ClaudeModel,
+		VoyageAPIKey:    existingCompany.VoyageAPIKey,
+		VoyageModel:     existingCompany.VoyageModel,
+		SystemPrompt:    existingCompany.SystemPrompt,
+		CRMLinks:        existingCompany.CRMLinks,
 		IsActive:        page.IsActive,
+		MaxTokens:       existingCompany.MaxTokens,
+		ResponseDelay:   existingCompany.ResponseDelay,
+		DefaultLanguage: existingCompany.DefaultLanguage,
+		CreatedAt:       time.Now(),
+		UpdatedAt:       time.Now(),
 	}
 
-	company.Pages = append(company.Pages, newPage)
-
-	// Update company in database
-	update := bson.M{
-		"pages":      company.Pages,
-		"updated_at": time.Now(),
-	}
-
-	if err := services.UpdateCompany(ctx, companyID, update); err != nil {
+	// Create the new company document
+	if err := services.CreateCompany(ctx, newCompanyDoc); err != nil {
 		slog.Error("Failed to add page to company", "error", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error":   "Failed to add page to company",
@@ -432,46 +433,83 @@ func AddPageToCompany(c *fiber.Ctx) error {
 	}
 
 	slog.Info("Page added to company successfully",
-		"companyID", companyID,
+		"companyID", companyID.(string),
 		"pageID", page.PageID,
 		"pageName", page.PageName)
 
 	return c.JSON(fiber.Map{
 		"message": "Page added successfully",
-		"page":    newPage,
+		"page": fiber.Map{
+			"page_id":           page.PageID,
+			"page_name":         page.PageName,
+			"page_access_token": page.PageAccessToken[:10] + "...***HIDDEN***",
+			"is_active":         page.IsActive,
+		},
 	})
 }
 
-// GetCompany retrieves a company by ID
+// GetCompany retrieves the authenticated user's company info with all pages
 func GetCompany(c *fiber.Ctx) error {
-	companyID := c.Params("companyID")
-	if companyID == "" {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": "Company ID is required",
+	// Get company_id from session
+	companyID := c.Locals("company_id")
+	if companyID == nil {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+			"error": "Company ID not found in session",
 		})
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	company, err := services.GetCompanyByID(ctx, companyID)
-	if err != nil {
+	// Get all company documents (one per page) for this company ID
+	companies, err := services.GetCompaniesByCompanyID(ctx, companyID.(string))
+	if err != nil || len(companies) == 0 {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
 			"error":   "Company not found",
 			"details": err.Error(),
 		})
 	}
 
-	// Hide sensitive information
-	company.ClaudeAPIKey = "***HIDDEN***"
-	company.AppSecret = "***HIDDEN***"
-	for i := range company.Pages {
-		if len(company.Pages[i].PageAccessToken) > 10 {
-			company.Pages[i].PageAccessToken = company.Pages[i].PageAccessToken[:10] + "...***HIDDEN***"
+	// Use the first company doc for general company info
+	firstCompany := companies[0]
+
+	// Collect all pages
+	pages := make([]fiber.Map, 0, len(companies))
+	for _, comp := range companies {
+		pageToken := comp.PageAccessToken
+		if len(pageToken) > 10 {
+			pageToken = pageToken[:10] + "...***HIDDEN***"
 		}
+		pages = append(pages, fiber.Map{
+			"page_id":           comp.PageID,
+			"page_name":         comp.PageName,
+			"page_access_token": pageToken,
+			"is_active":         comp.IsActive,
+		})
 	}
 
-	return c.JSON(company)
+	// Build response with company info and pages array
+	response := fiber.Map{
+		"id":               firstCompany.ID,
+		"company_id":       firstCompany.CompanyID,
+		"company_name":     firstCompany.CompanyName,
+		"pages":            pages,
+		"app_secret":       "***HIDDEN***",
+		"claude_api_key":   "***HIDDEN***",
+		"claude_model":     firstCompany.ClaudeModel,
+		"voyage_api_key":   "***HIDDEN***",
+		"voyage_model":     firstCompany.VoyageModel,
+		"system_prompt":    firstCompany.SystemPrompt,
+		"crm_links":        firstCompany.CRMLinks,
+		"is_active":        firstCompany.IsActive,
+		"max_tokens":       firstCompany.MaxTokens,
+		"response_delay":   firstCompany.ResponseDelay,
+		"default_language": firstCompany.DefaultLanguage,
+		"created_at":       firstCompany.CreatedAt,
+		"updated_at":       firstCompany.UpdatedAt,
+	}
+
+	return c.JSON(response)
 }
 
 // TestWebhookConnection tests the webhook connection for a specific page

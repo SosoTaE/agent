@@ -59,12 +59,19 @@ type Change struct {
 
 // ChangeValue represents the value of a change
 type ChangeValue struct {
-	Item        string `json:"item"`
-	CommentID   string `json:"comment_id"`
-	PostID      string `json:"post_id"`
-	ParentID    string `json:"parent_id"`
-	SenderID    string `json:"sender_id"`
-	SenderName  string `json:"sender_name"`
-	Message     string `json:"message"`
-	CreatedTime int64  `json:"created_time"` // Unix timestamp from Facebook
+	Item        string        `json:"item"`
+	CommentID   string        `json:"comment_id"`
+	PostID      string        `json:"post_id"`
+	ParentID    string        `json:"parent_id"`
+	SenderID    string        `json:"sender_id,omitempty"`   // Deprecated: use From.ID instead
+	SenderName  string        `json:"sender_name,omitempty"` // Deprecated: use From.Name instead
+	From        *FacebookUser `json:"from,omitempty"`        // User who made the comment (primary source)
+	Message     string        `json:"message"`
+	CreatedTime int64         `json:"created_time"` // Unix timestamp from Facebook
+}
+
+// FacebookUser represents a Facebook user in webhook payloads
+type FacebookUser struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
 }
