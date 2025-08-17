@@ -1,0 +1,180 @@
+ {
+  "comment": "Each document in the companies collection now represents ONE page. If a company has multiple pages, create multiple documents with the same company_id",
+  
+  "example_1_first_page": {
+    "_id": "ObjectId('...')",
+    "company_id": "company_001",
+    "company_name": "Real Estate Agency LLC",
+    "page_id": "123456789012345",
+    "page_name": "Real Estate Agency - Main",
+    "page_access_token": "EAABw...your_page_access_token_here",
+    "app_secret": "your_app_secret_here",
+    "claude_api_key": "sk-ant-api03-...your_claude_api_key",
+    "claude_model": "claude-3-haiku-20240307",
+    "voyage_api_key": "pa-...your_voyage_api_key",
+    "voyage_model": "voyage-2",
+    "system_prompt": "You are a helpful real estate assistant for Real Estate Agency. Be professional and friendly. Help customers find their dream homes.",
+    "crm_links": [
+      {
+        "name": "Property Database",
+        "url": "https://api.yourcrm.com/properties",
+        "type": "api",
+        "api_key": "your_crm_api_key",
+        "headers": {
+          "X-Company-ID": "company_001"
+        },
+        "description": "Main property listing database",
+        "is_active": true
+      }
+    ],
+    "is_active": true,
+    "max_tokens": 1024,
+    "response_delay": 0,
+    "default_language": "en",
+    "created_at": "2024-01-15T10:00:00Z",
+    "updated_at": "2024-01-15T10:00:00Z"
+  },
+
+  "example_2_second_page_same_company": {
+    "_id": "ObjectId('...')",
+    "company_id": "company_001",
+    "company_name": "Real Estate Agency LLC",
+    "page_id": "987654321098765",
+    "page_name": "Real Estate Agency - Rentals",
+    "page_access_token": "EAABw...different_page_access_token",
+    "app_secret": "your_app_secret_here",
+    "claude_api_key": "sk-ant-api03-...your_claude_api_key",
+    "claude_model": "claude-3-haiku-20240307",
+    "voyage_api_key": "pa-...your_voyage_api_key",
+    "voyage_model": "voyage-2",
+    "system_prompt": "You are a helpful rental specialist for Real Estate Agency. Focus on rental properties and tenant inquiries.",
+    "crm_links": [
+      {
+        "name": "Property Database",
+        "url": "https://api.yourcrm.com/properties",
+        "type": "api",
+        "api_key": "your_crm_api_key",
+        "headers": {
+          "X-Company-ID": "company_001"
+        },
+        "description": "Main property listing database",
+        "is_active": true
+      }
+    ],
+    "is_active": true,
+    "max_tokens": 1024,
+    "response_delay": 0,
+    "default_language": "en",
+    "created_at": "2024-01-15T10:00:00Z",
+    "updated_at": "2024-01-15T10:00:00Z"
+  },
+
+  "example_3_different_company": {
+    "_id": "ObjectId('...')",
+    "company_id": "company_002",
+    "company_name": "Car Dealership",
+    "page_id": "555666777888999",
+    "page_name": "Best Cars Dealership",
+    "page_access_token": "EAABw...car_dealer_token",
+    "app_secret": "different_app_secret",
+    "claude_api_key": "sk-ant-api03-...different_claude_key",
+    "claude_model": "claude-3-sonnet-20240229",
+    "voyage_api_key": "",
+    "voyage_model": "",
+    "system_prompt": "You are a knowledgeable car sales assistant. Help customers find the perfect vehicle for their needs and budget.",
+    "crm_links": [],
+    "is_active": true,
+    "max_tokens": 2048,
+    "response_delay": 2,
+    "default_language": "en",
+    "created_at": "2024-02-01T09:00:00Z",
+    "updated_at": "2024-02-01T09:00:00Z"
+  },
+
+  "example_4_minimal_configuration": {
+    "_id": "ObjectId('...')",
+    "company_id": "company_003",
+    "company_name": "Small Business",
+    "page_id": "111222333444555",
+    "page_name": "Small Business Support",
+    "page_access_token": "EAABw...small_business_token",
+    "app_secret": "app_secret_here",
+    "claude_api_key": "sk-ant-api03-...api_key_here",
+    "claude_model": "claude-3-haiku-20240307",
+    "voyage_api_key": "",
+    "voyage_model": "",
+    "system_prompt": "",
+    "crm_links": [],
+    "is_active": true,
+    "max_tokens": 1024,
+    "response_delay": 0,
+    "default_language": "en",
+    "created_at": "2024-03-01T12:00:00Z",
+    "updated_at": "2024-03-01T12:00:00Z"
+  },
+
+  "example_5_with_rag_enabled": {
+    "_id": "ObjectId('...')",
+    "company_id": "company_004",
+    "company_name": "Tech Solutions Inc",
+    "page_id": "999888777666555",
+    "page_name": "Tech Solutions Support",
+    "page_access_token": "EAABw...tech_support_token",
+    "app_secret": "tech_app_secret",
+    "claude_api_key": "sk-ant-api03-...tech_claude_key",
+    "claude_model": "claude-3-opus-20240229",
+    "voyage_api_key": "pa-...voyage_key_for_embeddings",
+    "voyage_model": "voyage-large-2",
+    "system_prompt": "You are a technical support specialist. Use the knowledge base to provide accurate solutions.",
+    "crm_links": [
+      {
+        "name": "Knowledge Base",
+        "url": "https://api.techsolutions.com/kb",
+        "type": "api",
+        "api_key": "kb_api_key",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "description": "Technical documentation and solutions",
+        "is_active": true
+      },
+      {
+        "name": "Ticket System",
+        "url": "https://api.techsolutions.com/tickets",
+        "type": "webhook",
+        "api_key": "ticket_api_key",
+        "headers": {},
+        "description": "Customer ticket tracking",
+        "is_active": true
+      }
+    ],
+    "is_active": true,
+    "max_tokens": 4096,
+    "response_delay": 0,
+    "default_language": "en",
+    "created_at": "2024-03-15T08:00:00Z",
+    "updated_at": "2024-03-15T08:00:00Z"
+  },
+
+  "example_6_inactive_page": {
+    "_id": "ObjectId('...')",
+    "company_id": "company_001",
+    "company_name": "Real Estate Agency LLC",
+    "page_id": "444333222111000",
+    "page_name": "Real Estate Agency - Test Page",
+    "page_access_token": "EAABw...test_token",
+    "app_secret": "your_app_secret_here",
+    "claude_api_key": "sk-ant-api03-...your_claude_api_key",
+    "claude_model": "claude-3-haiku-20240307",
+    "voyage_api_key": "",
+    "voyage_model": "",
+    "system_prompt": "Test page for development",
+    "crm_links": [],
+    "is_active": false,
+    "max_tokens": 512,
+    "response_delay": 0,
+    "default_language": "en",
+    "created_at": "2024-01-20T14:00:00Z",
+    "updated_at": "2024-01-20T14:00:00Z"
+  }
+}
