@@ -221,9 +221,17 @@ func HandleComment(change ChangeValue, pageID string) {
 		"pageID", pageID,
 	)
 
-	// Fetch RAG context if enabled for this page
+	// Fetch RAG context if enabled for this page and has active CRM links
 	var ragContext string
-	if len(pageConfig.CRMLinks) > 0 {
+	hasActiveCRMLinks := false
+	for _, crmLink := range pageConfig.CRMLinks {
+		if crmLink.IsActive {
+			hasActiveCRMLinks = true
+			break
+		}
+	}
+
+	if hasActiveCRMLinks {
 		// Get relevant context based on the user's message, filtered by page ID
 		ragContext, err = services.GetRAGContext(ctx, message, company.CompanyID, pageID)
 		if err != nil {
@@ -236,6 +244,11 @@ func HandleComment(change ChangeValue, pageID string) {
 				"pageID", pageID,
 			)
 		}
+	} else if len(pageConfig.CRMLinks) > 0 {
+		slog.Info("CRM links exist but none are active, skipping RAG context",
+			"pageID", pageID,
+			"totalCRMLinks", len(pageConfig.CRMLinks),
+		)
 	}
 
 	// Generate context-aware response with history

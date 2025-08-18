@@ -243,9 +243,17 @@ func HandleMessage(messaging Messaging, pageID string) {
 		"pageID", pageID,
 	)
 
-	// Fetch RAG context if enabled for this company
+	// Fetch RAG context if enabled for this company and has active CRM links
 	var ragContext string
-	if len(pageConfig.CRMLinks) > 0 {
+	hasActiveCRMLinks := false
+	for _, crmLink := range pageConfig.CRMLinks {
+		if crmLink.IsActive {
+			hasActiveCRMLinks = true
+			break
+		}
+	}
+
+	if hasActiveCRMLinks {
 		// Get relevant context based on the user's message, filtered by page ID
 		ragContext, err = services.GetRAGContext(ctx, messageText, company.CompanyID, pageID)
 		if err != nil {
@@ -258,6 +266,11 @@ func HandleMessage(messaging Messaging, pageID string) {
 				"pageID", pageID,
 			)
 		}
+	} else if len(pageConfig.CRMLinks) > 0 {
+		slog.Info("CRM links exist but none are active, skipping RAG context",
+			"pageID", pageID,
+			"totalCRMLinks", len(pageConfig.CRMLinks),
+		)
 	}
 
 	// Get AI response from Claude with tool use for agent detection
@@ -272,7 +285,8 @@ func HandleMessage(messaging Messaging, pageID string) {
 	if wantsAgent || strings.Contains(aiResponse, "CUSTOMER_WANTS_REAL_PERSON||") {
 
 		// Update customer's stop status
-		if _, err := services.UpdateCustomerStopStatus(ctx, senderID, pageID, true); err != nil {
+		updatedCustomer, err := services.UpdateCustomerStopStatus(ctx, senderID, pageID, true)
+		if err != nil {
 			slog.Error("Failed to update customer stop status", "error", err)
 		} else {
 			slog.Info("Customer marked as wanting real person assistance (via tool)",
@@ -295,6 +309,20 @@ func HandleMessage(messaging Messaging, pageID string) {
 				"timestamp":     time.Now().Unix(),
 			},
 		})
+
+		// Also broadcast the customer status update
+		if updatedCustomer != nil {
+			wsManager.BroadcastToCompany(company.CompanyID, services.BroadcastMessage{
+				CompanyID: company.CompanyID,
+				PageID:    pageID,
+				Type:      "customer_stop_status_changed",
+				Data: map[string]interface{}{
+					"customer":  updatedCustomer,
+					"stop":      true,
+					"timestamp": time.Now().Unix(),
+				},
+			})
+		}
 	}
 
 	// Response delay removed for faster processing

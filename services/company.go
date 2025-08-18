@@ -216,3 +216,104 @@ func clearCompanyCache(companyID string) {
 		}
 	}
 }
+
+// ToggleCRMLink toggles the active status of a CRM link for a specific page
+func ToggleCRMLink(ctx context.Context, companyID, pageID, crmURL string, isActive bool) error {
+	collection := database.Collection("companies")
+
+	// Find the company
+	filter := bson.M{
+		"company_id":    companyID,
+		"pages.page_id": pageID,
+	}
+
+	// First, get the company to verify it exists and the page exists
+	var company models.Company
+	err := collection.FindOne(ctx, filter).Decode(&company)
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			return fmt.Errorf("company or page not found")
+		}
+		return err
+	}
+
+	// Find the page index and CRM link index
+	pageIndex := -1
+	crmIndex := -1
+	for i, page := range company.Pages {
+		if page.PageID == pageID {
+			pageIndex = i
+			for j, crm := range page.CRMLinks {
+				if crm.URL == crmURL {
+					crmIndex = j
+					break
+				}
+			}
+			break
+		}
+	}
+
+	if pageIndex == -1 {
+		return fmt.Errorf("page %s not found in company", pageID)
+	}
+	if crmIndex == -1 {
+		return fmt.Errorf("CRM link with URL %s not found", crmURL)
+	}
+
+	// Update the specific CRM link's IsActive status
+	updatePath := fmt.Sprintf("pages.%d.crm_links.%d.is_active", pageIndex, crmIndex)
+	update := bson.M{
+		"$set": bson.M{
+			updatePath:   isActive,
+			"updated_at": time.Now(),
+		},
+	}
+
+	result, err := collection.UpdateOne(ctx, filter, update)
+	if err != nil {
+		return err
+	}
+
+	if result.ModifiedCount == 0 {
+		return fmt.Errorf("no documents were updated")
+	}
+
+	// Clear cache for this company
+	clearCompanyCache(companyID)
+
+	// Sync vector document status with CRM link status
+	if err := SyncVectorDocumentWithCRMLink(ctx, companyID, pageID, crmURL, isActive); err != nil {
+		// Log error but don't fail the operation
+		slog.Warn("Failed to sync vector document status",
+			"error", err,
+			"companyID", companyID,
+			"pageID", pageID,
+			"crmURL", crmURL,
+		)
+	}
+
+	slog.Info("CRM link status updated",
+		"companyID", companyID,
+		"pageID", pageID,
+		"crmURL", crmURL,
+		"isActive", isActive)
+
+	return nil
+}
+
+// GetCRMLinks retrieves all CRM links for a specific page
+func GetCRMLinks(ctx context.Context, companyID, pageID string) ([]models.CRMLink, error) {
+	company, err := GetCompanyByID(ctx, companyID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Find the page
+	for _, page := range company.Pages {
+		if page.PageID == pageID {
+			return page.CRMLinks, nil
+		}
+	}
+
+	return nil, fmt.Errorf("page %s not found in company", pageID)
+}

@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"strings"
 	"time"
+
+	"facebook-bot/models"
 )
 
 // ProcessorFunc is a function that processes CRM JSON and returns meaningful text
@@ -378,18 +380,63 @@ func FetchAndProcessCRMData(ctx context.Context, pageID string, companyID string
 		return nil
 	}
 
+	// Get company configuration to check CRM links
+	company, err := GetCompanyByID(ctx, companyID)
+	if err != nil {
+		slog.Error("Failed to get company configuration", "error", err, "companyID", companyID)
+		return fmt.Errorf("failed to get company configuration: %w", err)
+	}
+
+	// Find the page configuration
+	var pageConfig *models.FacebookPage
+	for _, page := range company.Pages {
+		if page.PageID == pageID {
+			pageConfig = &page
+			break
+		}
+	}
+
+	if pageConfig == nil {
+		slog.Warn("Page not found in company configuration", "pageID", pageID, "companyID", companyID)
+		return fmt.Errorf("page %s not found in company configuration", pageID)
+	}
+
+	// Filter only active CRM links
+	var activeCRMURLs []string
+	for _, crmLink := range pageConfig.CRMLinks {
+		if crmLink.IsActive {
+			// Check if this URL is in the processor's URLs
+			for _, processorURL := range processor.CRMURLs {
+				if crmLink.URL == processorURL {
+					activeCRMURLs = append(activeCRMURLs, crmLink.URL)
+					break
+				}
+			}
+		}
+	}
+
+	if len(activeCRMURLs) == 0 {
+		slog.Info("No active CRM links found for page",
+			"pageID", pageID,
+			"companyID", companyID,
+			"totalCRMLinks", len(pageConfig.CRMLinks),
+		)
+		return nil
+	}
+
 	slog.Info("Processing CRM data for page",
 		"pageID", pageID,
 		"companyID", companyID,
-		"urls", len(processor.CRMURLs),
+		"activeCRMURLs", len(activeCRMURLs),
+		"totalCRMURLs", len(processor.CRMURLs),
 	)
 
 	var allProcessedText strings.Builder
 	allProcessedText.WriteString(fmt.Sprintf("Real Estate Information (Updated: %s)\n\n", time.Now().Format("2006-01-02 15:04:05")))
 
-	// Fetch and process each CRM URL
-	for _, url := range processor.CRMURLs {
-		slog.Info("Fetching CRM data", "url", url)
+	// Fetch and process only active CRM URLs
+	for _, url := range activeCRMURLs {
+		slog.Info("Fetching CRM data from active link", "url", url)
 
 		// Fetch the CRM data
 		jsonData, err := FetchCRMData(ctx, url, "")
@@ -428,33 +475,41 @@ func FetchAndProcessCRMData(ctx context.Context, pageID string, companyID string
 		return nil
 	}
 
-	// Store the processed text as embeddings in MongoDB
-	metadata := map[string]string{
-		"source_type": "crm",
-		"page_id":     pageID,
-		"update_time": time.Now().Format(time.RFC3339),
-	}
-
-	// Split text into chunks if it's too large (max 8000 chars per chunk for better embedding quality)
-	chunks := splitTextIntoChunks(finalText, 8000)
-
-	for i, chunk := range chunks {
-		chunkMetadata := make(map[string]string)
-		for k, v := range metadata {
-			chunkMetadata[k] = v
+	// Store one document per CRM URL
+	successCount := 0
+	for _, url := range activeCRMURLs {
+		// Find if this CRM link is active
+		isActive := false
+		for _, crmLink := range pageConfig.CRMLinks {
+			if crmLink.URL == url && crmLink.IsActive {
+				isActive = true
+				break
+			}
 		}
-		chunkMetadata["chunk_index"] = fmt.Sprintf("%d", i)
-		chunkMetadata["total_chunks"] = fmt.Sprintf("%d", len(chunks))
 
-		err := StoreEmbeddings(ctx, companyID, pageID, chunk, "crm", chunkMetadata)
+		// Store the processed text as embeddings in MongoDB
+		metadata := map[string]string{
+			"source_type": "crm",
+			"page_id":     pageID,
+			"crm_url":     url,
+			"update_time": time.Now().Format(time.RFC3339),
+		}
+
+		// Store the entire content as one document per CRM URL
+		err := StoreEmbeddingsWithOptions(ctx, companyID, pageID, finalText, "crm", metadata, url, isActive)
 		if err != nil {
 			slog.Error("Failed to store embeddings",
 				"error", err,
 				"pageID", pageID,
-				"chunkIndex", i,
+				"crmURL", url,
 			)
-			return err
+			continue
 		}
+		successCount++
+	}
+
+	if successCount == 0 {
+		return fmt.Errorf("failed to store any CRM embeddings")
 	}
 
 	// Update the last updated time
@@ -464,7 +519,7 @@ func FetchAndProcessCRMData(ctx context.Context, pageID string, companyID string
 	slog.Info("Successfully stored CRM embeddings",
 		"pageID", pageID,
 		"companyID", companyID,
-		"totalChunks", len(chunks),
+		"documentsStored", successCount,
 		"totalTextLength", len(finalText),
 	)
 

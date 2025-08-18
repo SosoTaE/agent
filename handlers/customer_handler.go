@@ -318,6 +318,19 @@ func UpdateCustomerStopStatus(c *fiber.Ctx) error {
 		})
 	}
 
+	// Broadcast the customer status change via WebSocket
+	wsManager := services.GetWebSocketManager()
+	wsManager.BroadcastToCompany(companyID.(string), services.BroadcastMessage{
+		CompanyID: companyID.(string),
+		PageID:    reqBody.PageID,
+		Type:      "customer_stop_status_changed",
+		Data: map[string]interface{}{
+			"customer":  customer,
+			"stop":      reqBody.Stop,
+			"timestamp": time.Now().Unix(),
+		},
+	})
+
 	return c.JSON(fiber.Map{
 		"message":  "Customer status updated successfully",
 		"customer": customer,
@@ -403,6 +416,19 @@ func ToggleCustomerStopStatus(c *fiber.Ctx) error {
 			"error": "Failed to toggle customer status",
 		})
 	}
+
+	// Broadcast the customer status change via WebSocket
+	wsManager := services.GetWebSocketManager()
+	wsManager.BroadcastToCompany(companyID.(string), services.BroadcastMessage{
+		CompanyID: companyID.(string),
+		PageID:    reqBody.PageID,
+		Type:      "customer_stop_status_changed",
+		Data: map[string]interface{}{
+			"customer":  updatedCustomer,
+			"stop":      newStopStatus,
+			"timestamp": time.Now().Unix(),
+		},
+	})
 
 	return c.JSON(fiber.Map{
 		"message":       "Customer status toggled successfully",
@@ -493,6 +519,28 @@ func SendMessageToCustomer(c *fiber.Ctx) error {
 		})
 	}
 
+	// Check if customer is assigned to another agent
+	if customer.AgentID != "" && customer.AgentID != agentID {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+			"error": fmt.Sprintf("Customer is already assigned to %s. Only the assigned agent can send messages.", customer.AgentEmail),
+		})
+	}
+
+	// Auto-assign agent if not already assigned
+	if customer.AgentID == "" {
+		updatedCustomer, err := services.AssignAgentToCustomer(ctx, customerID, reqBody.PageID,
+			agentID, agentEmail, agentName)
+		if err != nil {
+			slog.Warn("Failed to auto-assign agent on message send", "error", err)
+		} else {
+			customer = updatedCustomer
+			slog.Info("Auto-assigned agent to customer on message send",
+				"customerID", customerID,
+				"agentID", agentID,
+				"agentEmail", agentEmail)
+		}
+	}
+
 	// Send message via Facebook Messenger
 	slog.Info("Attempting to send message to customer",
 		"customerID", customerID,
@@ -567,5 +615,306 @@ func SendMessageToCustomer(c *fiber.Ctx) error {
 			"agent":       agentEmail,
 			"timestamp":   time.Now().Unix(),
 		},
+	})
+}
+
+// UpdateCustomerAgentName updates the agent name assigned to a customer
+func UpdateCustomerAgentName(c *fiber.Ctx) error {
+	// Get customer_id from URL params
+	customerID := c.Params("customerID")
+	if customerID == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "Customer ID is required",
+		})
+	}
+
+	// Parse request body
+	var reqBody struct {
+		PageID    string `json:"page_id"`
+		AgentName string `json:"agent_name"`
+	}
+
+	if err := c.BodyParser(&reqBody); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "Invalid request body",
+		})
+	}
+
+	if reqBody.PageID == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "Page ID is required",
+		})
+	}
+
+	// Check authentication
+	companyID := c.Locals("company_id")
+	if companyID == nil {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+			"error": "Company ID not found in session",
+		})
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Verify page belongs to company
+	_, err := services.ValidatePageOwnership(ctx, reqBody.PageID, companyID.(string))
+	if err != nil {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+			"error": "Page not found or access denied",
+		})
+	}
+
+	// Update the agent name
+	err = services.UpdateCustomerAgentName(ctx, customerID, reqBody.PageID, reqBody.AgentName)
+	if err != nil {
+		slog.Error("Failed to update customer agent name", "error", err)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "Failed to update agent name",
+		})
+	}
+
+	// Get updated customer to return
+	customer, err := services.GetCustomer(ctx, customerID, reqBody.PageID)
+	if err != nil || customer == nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+			"error": "Customer not found",
+		})
+	}
+
+	return c.JSON(fiber.Map{
+		"message":  "Agent name updated successfully",
+		"customer": customer,
+	})
+}
+
+// UnassignAgentFromCustomer removes agent assignment from a customer
+func UnassignAgentFromCustomer(c *fiber.Ctx) error {
+	// Get customer_id from URL params
+	customerID := c.Params("customerID")
+	if customerID == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "Customer ID is required",
+		})
+	}
+
+	// Parse request body
+	var reqBody struct {
+		PageID string `json:"page_id"`
+	}
+
+	if err := c.BodyParser(&reqBody); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "Invalid request body",
+		})
+	}
+
+	if reqBody.PageID == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "Page ID is required",
+		})
+	}
+
+	// Check authentication
+	companyID := c.Locals("company_id")
+	if companyID == nil {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+			"error": "Company ID not found in session",
+		})
+	}
+
+	// Get agent info from session
+	agentID := c.Locals("user_id")
+	agentEmail := c.Locals("email")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Verify page belongs to company
+	company, err := services.GetCompanyByID(ctx, companyID.(string))
+	if err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+			"error": "Company not found",
+		})
+	}
+
+	pageFound := false
+	companyPages, _ := services.GetPagesByCompanyID(ctx, company.CompanyID)
+	for _, p := range companyPages {
+		if p.PageID == reqBody.PageID {
+			pageFound = true
+			break
+		}
+	}
+	if !pageFound {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+			"error": "Page not found or access denied",
+		})
+	}
+
+	// Get current customer
+	customer, err := services.GetCustomer(ctx, customerID, reqBody.PageID)
+	if err != nil || customer == nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+			"error": "Customer not found",
+		})
+	}
+
+	// Check if the requesting agent is the one assigned (or is an admin)
+	userRole := c.Locals("role")
+	if customer.AgentID != "" && customer.AgentID != agentID.(string) && userRole != "admin" {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+			"error": "Only the assigned agent or an admin can unassign",
+		})
+	}
+
+	// Unassign the agent
+	updatedCustomer, err := services.UnassignAgentFromCustomer(ctx, customerID, reqBody.PageID)
+	if err != nil {
+		slog.Error("Failed to unassign agent from customer",
+			"error", err,
+			"customerID", customerID,
+			"pageID", reqBody.PageID)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "Failed to unassign agent",
+		})
+	}
+
+	if updatedCustomer == nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+			"error": "Customer not found",
+		})
+	}
+
+	// Broadcast the unassignment to all connected clients
+	wsManager := services.GetWebSocketManager()
+	wsManager.BroadcastToCompany(companyID.(string), services.BroadcastMessage{
+		CompanyID: companyID.(string),
+		PageID:    reqBody.PageID,
+		Type:      "agent_status_changed",
+		Data: map[string]interface{}{
+			"customer_id": customerID,
+			"customer":    updatedCustomer,
+			"action":      "unassigned",
+			"agent_email": agentEmail,
+			"timestamp":   time.Now().Unix(),
+		},
+	})
+
+	slog.Info("Agent unassigned from customer via REST API",
+		"customerID", customerID,
+		"pageID", reqBody.PageID,
+		"agentEmail", agentEmail,
+		"companyID", companyID)
+
+	return c.JSON(fiber.Map{
+		"message":  "Agent unassigned successfully",
+		"customer": updatedCustomer,
+	})
+}
+
+// UpdateCustomerAssignmentStatus updates the is_assigned field for a customer
+func UpdateCustomerAssignmentStatus(c *fiber.Ctx) error {
+	// Get customer_id from URL params
+	customerID := c.Params("customerID")
+	if customerID == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "Customer ID is required",
+		})
+	}
+
+	// Parse request body
+	var reqBody struct {
+		PageID     string `json:"page_id"`
+		IsAssigned bool   `json:"is_assigned"`
+	}
+
+	if err := c.BodyParser(&reqBody); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "Invalid request body",
+		})
+	}
+
+	if reqBody.PageID == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "Page ID is required",
+		})
+	}
+
+	// Check authentication
+	companyID := c.Locals("company_id")
+	if companyID == nil {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+			"error": "Company ID not found in session",
+		})
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Verify page belongs to company
+	company, err := services.GetCompanyByID(ctx, companyID.(string))
+	if err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+			"error": "Company not found",
+		})
+	}
+
+	pageFound := false
+	companyPages, _ := services.GetPagesByCompanyID(ctx, company.CompanyID)
+	for _, p := range companyPages {
+		if p.PageID == reqBody.PageID {
+			pageFound = true
+			break
+		}
+	}
+	if !pageFound {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+			"error": "Page not found or access denied",
+		})
+	}
+
+	// Update the assignment status
+	updatedCustomer, err := services.UpdateCustomerAssignmentStatus(ctx, customerID, reqBody.PageID, reqBody.IsAssigned)
+	if err != nil {
+		slog.Error("Failed to update customer assignment status",
+			"error", err,
+			"customerID", customerID,
+			"pageID", reqBody.PageID,
+			"isAssigned", reqBody.IsAssigned)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "Failed to update assignment status",
+		})
+	}
+
+	if updatedCustomer == nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+			"error": "Customer not found",
+		})
+	}
+
+	// Broadcast the update to all connected clients
+	wsManager := services.GetWebSocketManager()
+	wsManager.BroadcastToCompany(companyID.(string), services.BroadcastMessage{
+		CompanyID: companyID.(string),
+		PageID:    reqBody.PageID,
+		Type:      "customer_assignment_updated",
+		Data: map[string]interface{}{
+			"customer_id": customerID,
+			"customer":    updatedCustomer,
+			"is_assigned": reqBody.IsAssigned,
+			"timestamp":   time.Now().Unix(),
+		},
+	})
+
+	slog.Info("Customer assignment status updated via REST API",
+		"customerID", customerID,
+		"pageID", reqBody.PageID,
+		"isAssigned", reqBody.IsAssigned,
+		"companyID", companyID)
+
+	return c.JSON(fiber.Map{
+		"message":  "Assignment status updated successfully",
+		"customer": updatedCustomer,
 	})
 }

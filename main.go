@@ -169,16 +169,24 @@ func main() {
 	dashboard.Get("/messages/conversation/:customerID", handlers.GetCustomerConversation) // Get customer conversation with bot
 
 	// Customer endpoints
-	dashboard.Get("/customers", handlers.GetCustomers)                                      // Get customers list
-	dashboard.Get("/customers/search", handlers.SearchCustomers)                            // Search customers
-	dashboard.Get("/customers/stats", handlers.GetCustomerStats)                            // Get customer statistics
-	dashboard.Get("/customers/:customerID", handlers.GetCustomerDetails)                    // Get specific customer
-	dashboard.Put("/customers/:customerID/stop", handlers.UpdateCustomerStopStatus)         // Update customer stop status
-	dashboard.Post("/customers/:customerID/toggle-stop", handlers.ToggleCustomerStopStatus) // Toggle customer stop status
-	dashboard.Post("/customers/:customerID/message", handlers.SendMessageToCustomer)        // Send message to customer
+	dashboard.Get("/customers", handlers.GetCustomers)                                          // Get customers list
+	dashboard.Get("/customers/search", handlers.SearchCustomers)                                // Search customers
+	dashboard.Get("/customers/stats", handlers.GetCustomerStats)                                // Get customer statistics
+	dashboard.Get("/customers/:customerID", handlers.GetCustomerDetails)                        // Get specific customer
+	dashboard.Put("/customers/:customerID/stop", handlers.UpdateCustomerStopStatus)             // Update customer stop status
+	dashboard.Post("/customers/:customerID/toggle-stop", handlers.ToggleCustomerStopStatus)     // Toggle customer stop status
+	dashboard.Post("/customers/:customerID/message", handlers.SendMessageToCustomer)            // Send message to customer
+	dashboard.Put("/customers/:customerID/agent", handlers.UpdateCustomerAgentName)             // Update customer agent name
+	dashboard.Delete("/customers/:customerID/agent", handlers.UnassignAgentFromCustomer)        // Remove agent assignment from customer
+	dashboard.Put("/customers/:customerID/assignment", handlers.UpdateCustomerAssignmentStatus) // Update is_assigned status
 
 	dashboard.Get("/posts", handlers.GetPostsList)
 	dashboard.Get("/posts/company", handlers.GetPostIDsByCompanyHandler) // Get posts for company
+
+	// CRM Link Management endpoints
+	dashboard.Get("/pages/:pageID/crm-links", handlers.GetCRMLinks)          // Get all CRM links for a page
+	dashboard.Put("/pages/:pageID/crm-links/toggle", handlers.ToggleCRMLink) // Toggle CRM link status
+	dashboard.Put("/pages/:pageID/crm-links", handlers.UpdateCRMLink)        // Update or add CRM link
 
 	// WebSocket endpoint (requires authentication)
 	dashboard.Get("/ws", handlers.WebSocketUpgrade, websocket.New(handlers.HandleWebSocket))

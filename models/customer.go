@@ -22,6 +22,11 @@ type Customer struct {
 	FirstSeen    time.Time          `bson:"first_seen" json:"first_seen"`                         // First interaction time
 	Stop         bool               `bson:"stop" json:"stop"`                                     // Whether customer wants to talk to real person
 	StoppedAt    *time.Time         `bson:"stopped_at,omitempty" json:"stopped_at,omitempty"`     // When customer requested real person
+	IsAssigned   bool               `bson:"is_assigned" json:"is_assigned"`                       // Whether an agent is currently assigned
+	AgentName    string             `bson:"agent_name,omitempty" json:"agent_name,omitempty"`     // Name of the agent handling the customer
+	AgentID      string             `bson:"agent_id,omitempty" json:"agent_id,omitempty"`         // ID of the agent currently handling
+	AgentEmail   string             `bson:"agent_email,omitempty" json:"agent_email,omitempty"`   // Email of the agent currently handling
+	AssignedAt   *time.Time         `bson:"assigned_at,omitempty" json:"assigned_at,omitempty"`   // When agent was assigned
 	CreatedAt    time.Time          `bson:"created_at" json:"created_at"`
 	UpdatedAt    time.Time          `bson:"updated_at" json:"updated_at"`
 }

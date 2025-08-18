@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -958,5 +959,256 @@ func GetRolePermissions(c *fiber.Ctx) error {
 
 	return c.JSON(fiber.Map{
 		"roles": roles,
+	})
+}
+
+// ToggleCRMLink handles toggling the active status of a CRM link
+func ToggleCRMLink(c *fiber.Ctx) error {
+	// Get company ID from session
+	companyID := c.Locals("company_id")
+	if companyID == nil {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+			"error": "Company ID not found in session",
+		})
+	}
+
+	// Get page ID from URL params
+	pageID := c.Params("pageID")
+	if pageID == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "Page ID is required",
+		})
+	}
+
+	// Parse request body
+	var reqBody struct {
+		URL      string `json:"url" validate:"required"`
+		IsActive bool   `json:"is_active"`
+	}
+
+	if err := c.BodyParser(&reqBody); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "Invalid request body",
+		})
+	}
+
+	if reqBody.URL == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "CRM URL is required",
+		})
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Verify page belongs to company
+	_, err := services.ValidatePageOwnership(ctx, pageID, companyID.(string))
+	if err != nil {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+			"error": "Page not found or access denied",
+		})
+	}
+
+	// Toggle the CRM link status
+	err = services.ToggleCRMLink(ctx, companyID.(string), pageID, reqBody.URL, reqBody.IsActive)
+	if err != nil {
+		slog.Error("Failed to toggle CRM link status",
+			"companyID", companyID,
+			"pageID", pageID,
+			"url", reqBody.URL,
+			"error", err)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": err.Error(),
+		})
+	}
+
+	slog.Info("CRM link status toggled",
+		"companyID", companyID,
+		"pageID", pageID,
+		"url", reqBody.URL,
+		"isActive", reqBody.IsActive)
+
+	return c.JSON(fiber.Map{
+		"message":   "CRM link status updated successfully",
+		"url":       reqBody.URL,
+		"is_active": reqBody.IsActive,
+	})
+}
+
+// GetCRMLinks retrieves all CRM links for a specific page
+func GetCRMLinks(c *fiber.Ctx) error {
+	// Get company ID from session
+	companyID := c.Locals("company_id")
+	if companyID == nil {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+			"error": "Company ID not found in session",
+		})
+	}
+
+	// Get page ID from URL params
+	pageID := c.Params("pageID")
+	if pageID == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "Page ID is required",
+		})
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Verify page belongs to company
+	_, err := services.ValidatePageOwnership(ctx, pageID, companyID.(string))
+	if err != nil {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+			"error": "Page not found or access denied",
+		})
+	}
+
+	// Get CRM links
+	crmLinks, err := services.GetCRMLinks(ctx, companyID.(string), pageID)
+	if err != nil {
+		slog.Error("Failed to get CRM links",
+			"companyID", companyID,
+			"pageID", pageID,
+			"error", err)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "Failed to retrieve CRM links",
+		})
+	}
+
+	return c.JSON(fiber.Map{
+		"crm_links": crmLinks,
+		"page_id":   pageID,
+		"count":     len(crmLinks),
+	})
+}
+
+// UpdateCRMLink updates a CRM link configuration
+func UpdateCRMLink(c *fiber.Ctx) error {
+	// Get company ID from session
+	companyID := c.Locals("company_id")
+	if companyID == nil {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+			"error": "Company ID not found in session",
+		})
+	}
+
+	// Get page ID from URL params
+	pageID := c.Params("pageID")
+	if pageID == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "Page ID is required",
+		})
+	}
+
+	// Parse request body
+	var reqBody models.CRMLink
+	if err := c.BodyParser(&reqBody); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "Invalid request body",
+		})
+	}
+
+	if reqBody.URL == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "CRM URL is required",
+		})
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Verify page belongs to company
+	_, err := services.ValidatePageOwnership(ctx, pageID, companyID.(string))
+	if err != nil {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+			"error": "Page not found or access denied",
+		})
+	}
+
+	// Get the database
+	db := services.GetDatabase()
+	collection := db.Collection("companies")
+
+	// Update the CRM link
+	filter := bson.M{
+		"company_id":    companyID,
+		"pages.page_id": pageID,
+	}
+
+	// Find the company first to get indices
+	var company models.Company
+	err = collection.FindOne(ctx, filter).Decode(&company)
+	if err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+			"error": "Company or page not found",
+		})
+	}
+
+	// Find indices
+	pageIndex := -1
+	crmIndex := -1
+	for i, page := range company.Pages {
+		if page.PageID == pageID {
+			pageIndex = i
+			for j, crm := range page.CRMLinks {
+				if crm.URL == reqBody.URL {
+					crmIndex = j
+					break
+				}
+			}
+			break
+		}
+	}
+
+	if pageIndex == -1 {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+			"error": "Page not found",
+		})
+	}
+
+	var update bson.M
+	if crmIndex == -1 {
+		// Add new CRM link
+		update = bson.M{
+			"$push": bson.M{
+				fmt.Sprintf("pages.%d.crm_links", pageIndex): reqBody,
+			},
+			"$set": bson.M{
+				"updated_at": time.Now(),
+			},
+		}
+	} else {
+		// Update existing CRM link
+		update = bson.M{
+			"$set": bson.M{
+				fmt.Sprintf("pages.%d.crm_links.%d", pageIndex, crmIndex): reqBody,
+				"updated_at": time.Now(),
+			},
+		}
+	}
+
+	_, err = collection.UpdateOne(ctx, filter, update)
+	if err != nil {
+		slog.Error("Failed to update CRM link",
+			"companyID", companyID,
+			"pageID", pageID,
+			"error", err)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "Failed to update CRM link",
+		})
+	}
+
+	// Clear cache
+	services.GetWebSocketManager() // This will trigger any necessary cache clearing
+
+	action := "updated"
+	if crmIndex == -1 {
+		action = "added"
+	}
+
+	return c.JSON(fiber.Map{
+		"message":  fmt.Sprintf("CRM link %s successfully", action),
+		"crm_link": reqBody,
 	})
 }

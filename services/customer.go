@@ -372,3 +372,243 @@ func GetStoppedCustomersCount(ctx context.Context, companyID string) (int64, err
 
 	return count, nil
 }
+
+// UpdateCustomerAgentName updates the agent_name field for a customer
+func UpdateCustomerAgentName(ctx context.Context, customerID, pageID, agentName string) error {
+	db := GetDatabase()
+	collection := db.Collection("customers")
+
+	filter := bson.M{
+		"customer_id": customerID,
+		"page_id":     pageID,
+	}
+
+	update := bson.M{
+		"$set": bson.M{
+			"agent_name": agentName,
+			"updated_at": time.Now(),
+		},
+	}
+
+	result, err := collection.UpdateOne(ctx, filter, update)
+	if err != nil {
+		slog.Error("Failed to update customer agent name",
+			"customerID", customerID,
+			"pageID", pageID,
+			"agentName", agentName,
+			"error", err)
+		return err
+	}
+
+	if result.MatchedCount == 0 {
+		slog.Warn("No customer found to update agent name",
+			"customerID", customerID,
+			"pageID", pageID)
+	} else {
+		slog.Info("Customer agent name updated",
+			"customerID", customerID,
+			"pageID", pageID,
+			"agentName", agentName)
+	}
+
+	return nil
+}
+
+// GetStoppedCustomers returns a list of customers who want to talk to a real person
+func GetStoppedCustomers(ctx context.Context, companyID string, pageID string, limit, skip int) ([]models.Customer, int64, error) {
+	db := GetDatabase()
+	collection := db.Collection("customers")
+
+	filter := bson.M{
+		"company_id": companyID,
+		"stop":       true,
+	}
+
+	// If pageID is provided, filter by page as well
+	if pageID != "" {
+		filter["page_id"] = pageID
+	}
+
+	// Get total count
+	totalCount, err := collection.CountDocuments(ctx, filter)
+	if err != nil {
+		slog.Error("Failed to count stopped customers",
+			"companyID", companyID,
+			"pageID", pageID,
+			"error", err)
+		return nil, 0, err
+	}
+
+	// Get customers with pagination
+	findOptions := options.Find().
+		SetSort(bson.M{"stopped_at": -1}). // Sort by when they requested help, newest first
+		SetSkip(int64(skip)).
+		SetLimit(int64(limit))
+
+	cursor, err := collection.Find(ctx, filter, findOptions)
+	if err != nil {
+		slog.Error("Failed to get stopped customers",
+			"companyID", companyID,
+			"pageID", pageID,
+			"error", err)
+		return nil, 0, err
+	}
+	defer cursor.Close(ctx)
+
+	var customers []models.Customer
+	if err := cursor.All(ctx, &customers); err != nil {
+		return nil, 0, err
+	}
+
+	slog.Debug("Retrieved stopped customers",
+		"companyID", companyID,
+		"pageID", pageID,
+		"count", len(customers),
+		"total", totalCount)
+
+	return customers, totalCount, nil
+}
+
+// AssignAgentToCustomer assigns an agent to handle a customer
+func AssignAgentToCustomer(ctx context.Context, customerID, pageID, agentID, agentEmail, agentName string) (*models.Customer, error) {
+	db := GetDatabase()
+	collection := db.Collection("customers")
+
+	filter := bson.M{
+		"customer_id": customerID,
+		"page_id":     pageID,
+	}
+
+	now := time.Now()
+	update := bson.M{
+		"$set": bson.M{
+			"agent_id":    agentID,
+			"agent_email": agentEmail,
+			"agent_name":  agentName,
+			"assigned_at": &now,
+			"is_assigned": true,
+			"updated_at":  now,
+		},
+	}
+
+	opts := options.FindOneAndUpdate().SetReturnDocument(options.After)
+
+	var customer models.Customer
+	err := collection.FindOneAndUpdate(ctx, filter, update, opts).Decode(&customer)
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			return nil, nil // Customer not found
+		}
+		slog.Error("Failed to assign agent to customer",
+			"customerID", customerID,
+			"pageID", pageID,
+			"agentID", agentID,
+			"error", err)
+		return nil, err
+	}
+
+	slog.Info("Agent assigned to customer",
+		"customerID", customerID,
+		"pageID", pageID,
+		"agentID", agentID,
+		"agentEmail", agentEmail,
+		"agentName", agentName)
+
+	return &customer, nil
+}
+
+// UnassignAgentFromCustomer removes agent assignment from a customer
+func UnassignAgentFromCustomer(ctx context.Context, customerID, pageID string) (*models.Customer, error) {
+	db := GetDatabase()
+	collection := db.Collection("customers")
+
+	filter := bson.M{
+		"customer_id": customerID,
+		"page_id":     pageID,
+	}
+
+	update := bson.M{
+		"$set": bson.M{
+			"is_assigned": false,
+			"updated_at":  time.Now(),
+		},
+		"$unset": bson.M{
+			"agent_id":    1,
+			"agent_email": 1,
+			"agent_name":  1,
+			"assigned_at": 1,
+		},
+	}
+
+	opts := options.FindOneAndUpdate().SetReturnDocument(options.After)
+
+	var customer models.Customer
+	err := collection.FindOneAndUpdate(ctx, filter, update, opts).Decode(&customer)
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			return nil, nil // Customer not found
+		}
+		slog.Error("Failed to unassign agent from customer",
+			"customerID", customerID,
+			"pageID", pageID,
+			"error", err)
+		return nil, err
+	}
+
+	slog.Info("Agent unassigned from customer",
+		"customerID", customerID,
+		"pageID", pageID)
+
+	return &customer, nil
+}
+
+// UpdateCustomerAssignmentStatus updates only the is_assigned field for a customer
+func UpdateCustomerAssignmentStatus(ctx context.Context, customerID, pageID string, isAssigned bool) (*models.Customer, error) {
+	db := GetDatabase()
+	collection := db.Collection("customers")
+
+	filter := bson.M{
+		"customer_id": customerID,
+		"page_id":     pageID,
+	}
+
+	update := bson.M{
+		"$set": bson.M{
+			"is_assigned": isAssigned,
+			"updated_at":  time.Now(),
+		},
+	}
+
+	// If setting to false, also clear agent fields
+	if !isAssigned {
+		update["$unset"] = bson.M{
+			"agent_id":    1,
+			"agent_email": 1,
+			"agent_name":  1,
+			"assigned_at": 1,
+		}
+	}
+
+	opts := options.FindOneAndUpdate().SetReturnDocument(options.After)
+
+	var customer models.Customer
+	err := collection.FindOneAndUpdate(ctx, filter, update, opts).Decode(&customer)
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			return nil, nil // Customer not found
+		}
+		slog.Error("Failed to update customer assignment status",
+			"customerID", customerID,
+			"pageID", pageID,
+			"isAssigned", isAssigned,
+			"error", err)
+		return nil, err
+	}
+
+	slog.Info("Customer assignment status updated",
+		"customerID", customerID,
+		"pageID", pageID,
+		"isAssigned", isAssigned)
+
+	return &customer, nil
+}

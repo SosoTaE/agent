@@ -14,10 +14,11 @@ import (
 func SearchWithStoredEmbeddings(ctx context.Context, query string, companyID string, pageID string, limit int) ([]SearchResult, error) {
 	collection := database.Collection("vector_documents")
 
-	// Fetch all documents for the page with their embeddings
+	// Fetch all active documents for the page with their embeddings
 	filter := bson.M{
 		"company_id": companyID,
 		"page_id":    pageID,
+		"is_active":  true,
 	}
 
 	cursor, err := collection.Find(ctx, filter)

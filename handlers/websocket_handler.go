@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -173,6 +174,18 @@ func handleWebSocketReceive(conn *services.WebSocketConnection) {
 			// Handle sending message from dashboard to customer
 			handleDashboardMessage(conn, msg)
 
+		case "get_stopped_customers":
+			// Handle request for customers who want to talk to real person
+			handleGetStoppedCustomers(conn, msg)
+
+		case "assign_agent":
+			// Handle agent assignment to customer
+			handleAssignAgent(conn, msg)
+
+		case "unassign_agent":
+			// Handle agent unassignment from customer
+			handleUnassignAgent(conn, msg)
+
 		default:
 			slog.Warn("Unknown WebSocket message type",
 				"type", msg.Type,
@@ -235,6 +248,40 @@ func handleDashboardMessage(conn *services.WebSocketConnection, msg WebSocketMes
 
 	if !customer.Stop {
 		sendWebSocketError(conn, "Customer has not requested human assistance")
+		return
+	}
+
+	// Auto-assign agent if not already assigned
+	if customer.AgentID == "" {
+		updatedCustomer, assignErr := services.AssignAgentToCustomer(ctx, msg.CustomerID, msg.PageID,
+			conn.UserID, conn.UserEmail, conn.UserName)
+		if assignErr != nil {
+			slog.Warn("Failed to auto-assign agent", "error", assignErr)
+		} else {
+			customer = updatedCustomer
+			// Broadcast agent assignment
+			wsManager := services.GetWebSocketManager()
+			wsManager.BroadcastToCompany(conn.CompanyID, services.BroadcastMessage{
+				CompanyID: conn.CompanyID,
+				PageID:    msg.PageID,
+				Type:      "agent_assignment_changed",
+				Data: map[string]interface{}{
+					"customer_id": msg.CustomerID,
+					"customer":    customer,
+					"agent_id":    conn.UserID,
+					"agent_email": conn.UserEmail,
+					"agent_name":  conn.UserName,
+					"action":      "assigned",
+					"timestamp":   time.Now().Unix(),
+				},
+			})
+			slog.Info("Auto-assigned agent to customer on message send",
+				"customerID", msg.CustomerID,
+				"agentID", conn.UserID)
+		}
+	} else if customer.AgentID != conn.UserID {
+		// Check if assigned to another agent
+		sendWebSocketError(conn, fmt.Sprintf("Customer is already assigned to %s", customer.AgentEmail))
 		return
 	}
 
@@ -315,4 +362,299 @@ func sendWebSocketError(conn *services.WebSocketConnection, errorMessage string)
 	if errorData, err := json.Marshal(errorMsg); err == nil {
 		conn.Send <- errorData
 	}
+}
+
+// handleGetStoppedCustomers handles requests for customers who want to talk to a real person
+func handleGetStoppedCustomers(conn *services.WebSocketConnection, msg WebSocketMessage) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Parse request parameters from Data field
+	var params struct {
+		PageID string `json:"page_id,omitempty"`
+		Limit  int    `json:"limit,omitempty"`
+		Skip   int    `json:"skip,omitempty"`
+	}
+
+	// Set defaults
+	params.Limit = 50
+	params.Skip = 0
+
+	// Parse parameters if provided
+	if msg.Data != nil {
+		if err := json.Unmarshal(msg.Data, &params); err != nil {
+			slog.Warn("Failed to parse stopped customers request params", "error", err)
+		}
+	}
+
+	// Validate limit
+	if params.Limit <= 0 || params.Limit > 200 {
+		params.Limit = 50
+	}
+
+	// If page_id is provided, validate it belongs to the company
+	if params.PageID != "" {
+		_, err := services.ValidatePageOwnership(ctx, params.PageID, conn.CompanyID)
+		if err != nil {
+			sendWebSocketError(conn, "Page not found or access denied")
+			return
+		}
+	}
+
+	// Get stopped customers
+	customers, totalCount, err := services.GetStoppedCustomers(ctx, conn.CompanyID, params.PageID, params.Limit, params.Skip)
+	if err != nil {
+		slog.Error("Failed to get stopped customers",
+			"companyID", conn.CompanyID,
+			"pageID", params.PageID,
+			"error", err)
+		sendWebSocketError(conn, "Failed to retrieve stopped customers")
+		return
+	}
+
+	// Calculate time since last conversation for each customer
+	type CustomerWithTimeSince struct {
+		models.Customer
+		TimeSinceLastConversation    string `json:"time_since_last_conversation"`
+		MinutesSinceLastConversation int    `json:"minutes_since_last_conversation"`
+		IsAssigned                   bool   `json:"is_assigned"`
+		IsAssignedToMe               bool   `json:"is_assigned_to_me"`
+	}
+
+	customersWithTime := make([]CustomerWithTimeSince, 0, len(customers))
+	now := time.Now()
+
+	for _, customer := range customers {
+		timeDiff := now.Sub(customer.UpdatedAt)
+		minutes := int(timeDiff.Minutes())
+
+		var timeStr string
+		if minutes < 60 {
+			timeStr = fmt.Sprintf("%d minutes ago", minutes)
+		} else if minutes < 1440 { // Less than 24 hours
+			hours := minutes / 60
+			timeStr = fmt.Sprintf("%d hours ago", hours)
+		} else {
+			days := minutes / 1440
+			timeStr = fmt.Sprintf("%d days ago", days)
+		}
+
+		isAssigned := customer.AgentID != ""
+		isAssignedToMe := customer.AgentID == conn.UserID
+
+		customersWithTime = append(customersWithTime, CustomerWithTimeSince{
+			Customer:                     customer,
+			TimeSinceLastConversation:    timeStr,
+			MinutesSinceLastConversation: minutes,
+			IsAssigned:                   isAssigned,
+			IsAssignedToMe:               isAssignedToMe,
+		})
+	}
+
+	// Send response
+	response := map[string]interface{}{
+		"type": "stopped_customers",
+		"data": map[string]interface{}{
+			"customers": customersWithTime,
+			"pagination": map[string]interface{}{
+				"total":    totalCount,
+				"limit":    params.Limit,
+				"skip":     params.Skip,
+				"has_more": int64(params.Skip+params.Limit) < totalCount,
+			},
+			"page_id": params.PageID,
+		},
+		"timestamp": time.Now().Unix(),
+	}
+
+	if responseData, err := json.Marshal(response); err == nil {
+		conn.Send <- responseData
+	}
+
+	slog.Info("Sent stopped customers to client",
+		"companyID", conn.CompanyID,
+		"count", len(customers),
+		"total", totalCount)
+}
+
+// handleAssignAgent handles agent assignment to a customer
+func handleAssignAgent(conn *services.WebSocketConnection, msg WebSocketMessage) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Parse request parameters
+	var params struct {
+		CustomerID string `json:"customer_id"`
+		PageID     string `json:"page_id"`
+	}
+
+	if msg.Data != nil {
+		if err := json.Unmarshal(msg.Data, &params); err != nil {
+			sendWebSocketError(conn, "Invalid request data")
+			return
+		}
+	}
+
+	if params.CustomerID == "" || params.PageID == "" {
+		sendWebSocketError(conn, "customer_id and page_id are required")
+		return
+	}
+
+	// Verify page belongs to company
+	_, err := services.ValidatePageOwnership(ctx, params.PageID, conn.CompanyID)
+	if err != nil {
+		sendWebSocketError(conn, "Page not found or access denied")
+		return
+	}
+
+	// Check if customer exists and needs help
+	customer, err := services.GetCustomer(ctx, params.CustomerID, params.PageID)
+	if err != nil || customer == nil {
+		sendWebSocketError(conn, "Customer not found")
+		return
+	}
+
+	if !customer.Stop {
+		sendWebSocketError(conn, "Customer has not requested human assistance")
+		return
+	}
+
+	// Check if customer is already assigned to another agent
+	if customer.AgentID != "" && customer.AgentID != conn.UserID {
+		sendWebSocketError(conn, fmt.Sprintf("Customer is already assigned to %s", customer.AgentEmail))
+		return
+	}
+
+	// Assign the agent to the customer
+	updatedCustomer, err := services.AssignAgentToCustomer(ctx, params.CustomerID, params.PageID,
+		conn.UserID, conn.UserEmail, conn.UserName)
+	if err != nil {
+		slog.Error("Failed to assign agent to customer", "error", err)
+		sendWebSocketError(conn, "Failed to assign agent")
+		return
+	}
+
+	// Send success response to the requesting agent
+	response := map[string]interface{}{
+		"type": "agent_assigned",
+		"data": map[string]interface{}{
+			"customer":    updatedCustomer,
+			"agent_id":    conn.UserID,
+			"agent_email": conn.UserEmail,
+			"agent_name":  conn.UserName,
+		},
+		"timestamp": time.Now().Unix(),
+	}
+
+	if responseData, err := json.Marshal(response); err == nil {
+		conn.Send <- responseData
+	}
+
+	// Broadcast to all connected users in the company
+	wsManager := services.GetWebSocketManager()
+	wsManager.BroadcastToCompany(conn.CompanyID, services.BroadcastMessage{
+		CompanyID: conn.CompanyID,
+		PageID:    params.PageID,
+		Type:      "agent_assignment_changed",
+		Data: map[string]interface{}{
+			"customer_id": params.CustomerID,
+			"customer":    updatedCustomer,
+			"agent_id":    conn.UserID,
+			"agent_email": conn.UserEmail,
+			"agent_name":  conn.UserName,
+			"action":      "assigned",
+			"timestamp":   time.Now().Unix(),
+		},
+	})
+
+	slog.Info("Agent assigned to customer via WebSocket",
+		"customerID", params.CustomerID,
+		"pageID", params.PageID,
+		"agentID", conn.UserID,
+		"agentEmail", conn.UserEmail)
+}
+
+// handleUnassignAgent handles agent unassignment from a customer
+func handleUnassignAgent(conn *services.WebSocketConnection, msg WebSocketMessage) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Parse request parameters
+	var params struct {
+		CustomerID string `json:"customer_id"`
+		PageID     string `json:"page_id"`
+	}
+
+	if msg.Data != nil {
+		if err := json.Unmarshal(msg.Data, &params); err != nil {
+			sendWebSocketError(conn, "Invalid request data")
+			return
+		}
+	}
+
+	if params.CustomerID == "" || params.PageID == "" {
+		sendWebSocketError(conn, "customer_id and page_id are required")
+		return
+	}
+
+	// Verify page belongs to company
+	_, err := services.ValidatePageOwnership(ctx, params.PageID, conn.CompanyID)
+	if err != nil {
+		sendWebSocketError(conn, "Page not found or access denied")
+		return
+	}
+
+	// Check if customer exists
+	customer, err := services.GetCustomer(ctx, params.CustomerID, params.PageID)
+	if err != nil || customer == nil {
+		sendWebSocketError(conn, "Customer not found")
+		return
+	}
+
+	// Check if the agent is actually assigned to this customer
+	if customer.AgentID != conn.UserID {
+		sendWebSocketError(conn, "You are not assigned to this customer")
+		return
+	}
+
+	// Unassign the agent from the customer
+	updatedCustomer, err := services.UnassignAgentFromCustomer(ctx, params.CustomerID, params.PageID)
+	if err != nil {
+		slog.Error("Failed to unassign agent from customer", "error", err)
+		sendWebSocketError(conn, "Failed to unassign agent")
+		return
+	}
+
+	// Send success response to the requesting agent
+	response := map[string]interface{}{
+		"type": "agent_unassigned",
+		"data": map[string]interface{}{
+			"customer": updatedCustomer,
+		},
+		"timestamp": time.Now().Unix(),
+	}
+
+	if responseData, err := json.Marshal(response); err == nil {
+		conn.Send <- responseData
+	}
+
+	// Broadcast to all connected users in the company
+	wsManager := services.GetWebSocketManager()
+	wsManager.BroadcastToCompany(conn.CompanyID, services.BroadcastMessage{
+		CompanyID: conn.CompanyID,
+		PageID:    params.PageID,
+		Type:      "agent_assignment_changed",
+		Data: map[string]interface{}{
+			"customer_id": params.CustomerID,
+			"customer":    updatedCustomer,
+			"action":      "unassigned",
+			"timestamp":   time.Now().Unix(),
+		},
+	})
+
+	slog.Info("Agent unassigned from customer via WebSocket",
+		"customerID", params.CustomerID,
+		"pageID", params.PageID,
+		"agentID", conn.UserID,
+		"agentEmail", conn.UserEmail)
 }

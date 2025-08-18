@@ -235,13 +235,15 @@ func GetClaudeResponseWithToolUse(ctx context.Context, input, messageType string
 
 	// Response Instructions
 	formattedInput.WriteString("YOUR TASK:\n")
-	formattedInput.WriteString("1. Determine if the customer wants a human agent (look for: human, agent, operator, representative, real person, etc.)\n")
+	formattedInput.WriteString("1. Determine if the customer EXPLICITLY wants a human agent\n")
+	formattedInput.WriteString("   ONLY mark as 'wants_agent' if they explicitly request: human, agent, operator, representative, real person, support team\n")
+	formattedInput.WriteString("   Common greetings in ANY language (hello, hi, გამარჯობა, привет, etc.) are NOT requests for agents\n")
 	formattedInput.WriteString("2. Call detect_agent_request tool with:\n")
-	formattedInput.WriteString("   - intent='wants_agent' if they explicitly ask for a human\n")
-	formattedInput.WriteString("   - intent='continue_bot' for ALL other cases (questions, math, greetings, general inquiries)\n")
+	formattedInput.WriteString("   - intent='wants_agent' ONLY if they explicitly ask for a human\n")
+	formattedInput.WriteString("   - intent='continue_bot' for EVERYTHING else (greetings, questions, math, general inquiries)\n")
 	formattedInput.WriteString("3. After using the tool, ALWAYS write a response:\n")
 	formattedInput.WriteString("   - For wants_agent: 'I understand you'd like to speak with a human agent. Let me connect you.'\n")
-	formattedInput.WriteString("   - For continue_bot: Answer their actual question (e.g., if they ask 'what is 2+2?', answer '4')\n")
+	formattedInput.WriteString("   - For continue_bot: Respond appropriately (greet back, answer questions, etc.)\n")
 
 	if ragContext != "" {
 		formattedInput.WriteString("\nUse the KNOWLEDGE BASE data above to answer questions accurately.\n")
@@ -250,18 +252,18 @@ func GetClaudeResponseWithToolUse(ctx context.Context, input, messageType string
 	// Define the tool for detecting agent requests
 	agentDetectionTool := Tool{
 		Name:        "detect_agent_request",
-		Description: "Always use this tool to indicate whether the customer wants to speak with a real human agent or continue with the bot",
+		Description: "Always use this tool to indicate whether the customer wants to speak with a real human agent or continue with the bot. Be very careful: greetings are NOT agent requests!",
 		InputSchema: InputSchema{
 			Type: "object",
 			Properties: map[string]Property{
 				"intent": {
 					Type:        "string",
-					Description: "Set to 'wants_agent' if customer requests human/agent/representative, otherwise 'continue_bot'",
+					Description: "Set to 'wants_agent' ONLY if customer explicitly requests human/agent/operator/representative. Set to 'continue_bot' for greetings, questions, and all other messages",
 					Enum:        []string{"wants_agent", "continue_bot"},
 				},
 				"reason": {
 					Type:        "string",
-					Description: "Brief explanation of why this intent was detected (e.g., 'Customer asked for human agent' or 'Customer is asking about products')",
+					Description: "Brief explanation of why this intent was detected (e.g., 'Customer said hello - this is a greeting' or 'Customer explicitly asked for human agent')",
 				},
 			},
 			Required: []string{"intent", "reason"},
@@ -277,10 +279,12 @@ func GetClaudeResponseWithToolUse(ctx context.Context, input, messageType string
 	// Create system message that enforces both tool use and text response
 	systemMessage := "You are a customer service assistant. You MUST ALWAYS do these two things in order:\n" +
 		"1. FIRST: Use the detect_agent_request tool to determine if the customer wants a human agent\n" +
+		"   - ONLY detect 'wants_agent' if they EXPLICITLY ask for human/agent/operator/representative\n" +
+		"   - Greetings in ANY language are NOT agent requests - they should be 'continue_bot'\n" +
 		"2. THEN: Write a text response to the customer\n\n" +
 		"If they want an agent: Acknowledge their request politely\n" +
-		"If they don't want an agent: Answer their question or respond to their message\n\n" +
-		"IMPORTANT: You must use the tool AND provide text. Never do only one without the other."
+		"If they don't want an agent: Respond naturally to their message (greet back, answer questions, etc.)\n\n" +
+		"IMPORTANT: Be very careful - simple greetings like 'hello', 'hi', 'გამარჯობა' are NOT requests for agents!"
 
 	// Create the request with tool
 	requestBody := ClaudeRequest{

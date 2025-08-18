@@ -25,7 +25,9 @@ type VectorDocument struct {
 	Content   string             `bson:"content" json:"content"`
 	Embedding []float32          `bson:"embedding" json:"embedding"`
 	Metadata  map[string]string  `bson:"metadata" json:"metadata"`
-	Source    string             `bson:"source" json:"source"` // "crm", "product", "faq", etc.
+	Source    string             `bson:"source" json:"source"`                       // "crm", "product", "faq", etc.
+	CRMURL    string             `bson:"crm_url,omitempty" json:"crm_url,omitempty"` // URL of the CRM link this document came from
+	IsActive  bool               `bson:"is_active" json:"is_active"`                 // Whether this document should be used in searches
 	CreatedAt time.Time          `bson:"created_at" json:"created_at"`
 	UpdatedAt time.Time          `bson:"updated_at" json:"updated_at"`
 }
@@ -114,6 +116,11 @@ func CosineSimilarity(a, b []float32) float32 {
 
 // StoreEmbeddings stores document embeddings in MongoDB
 func StoreEmbeddings(ctx context.Context, companyID, pageID, content, source string, metadata map[string]string) error {
+	return StoreEmbeddingsWithOptions(ctx, companyID, pageID, content, source, metadata, "", true)
+}
+
+// StoreEmbeddingsWithOptions stores document embeddings with additional options
+func StoreEmbeddingsWithOptions(ctx context.Context, companyID, pageID, content, source string, metadata map[string]string, crmURL string, isActive bool) error {
 	collection := database.Collection("vector_documents")
 
 	// Generate embeddings using company's configured provider
@@ -129,14 +136,27 @@ func StoreEmbeddings(ctx context.Context, companyID, pageID, content, source str
 		Embedding: embedding,
 		Metadata:  metadata,
 		Source:    source,
+		CRMURL:    crmURL,
+		IsActive:  isActive,
 		CreatedAt: time.Now(),
 		UpdatedAt: time.Now(),
 	}
 
-	// Upsert based on content hash to avoid duplicates
-	filter := bson.M{
-		"company_id": companyID,
-		"content":    content,
+	// Upsert based on CRM URL if provided, otherwise based on content
+	var filter bson.M
+	if crmURL != "" {
+		// For CRM documents, use URL as unique identifier
+		filter = bson.M{
+			"company_id": companyID,
+			"page_id":    pageID,
+			"crm_url":    crmURL,
+		}
+	} else {
+		// For other documents, use content as unique identifier
+		filter = bson.M{
+			"company_id": companyID,
+			"content":    content,
+		}
 	}
 
 	update := bson.M{"$set": doc}
@@ -149,7 +169,10 @@ func StoreEmbeddings(ctx context.Context, companyID, pageID, content, source str
 
 	slog.Info("Stored embeddings",
 		"companyID", companyID,
+		"pageID", pageID,
 		"source", source,
+		"crmURL", crmURL,
+		"isActive", isActive,
 		"contentLength", len(content),
 	)
 
@@ -166,10 +189,11 @@ func SearchSimilarDocumentsByPage(ctx context.Context, query string, companyID s
 		return nil, fmt.Errorf("failed to generate query embedding: %w", err)
 	}
 
-	// Fetch documents filtered by both company and page ID
+	// Fetch documents filtered by company, page ID, and active status
 	filter := bson.M{
 		"company_id": companyID,
 		"page_id":    pageID,
+		"is_active":  true,
 	}
 	cursor, err := collection.Find(ctx, filter)
 	if err != nil {
@@ -285,8 +309,11 @@ func SearchSimilarDocuments(ctx context.Context, query string, companyID string,
 		return nil, fmt.Errorf("failed to generate query embedding: %w", err)
 	}
 
-	// Fetch all documents for the company (in production, use vector index)
-	filter := bson.M{"company_id": companyID}
+	// Fetch all active documents for the company (in production, use vector index)
+	filter := bson.M{
+		"company_id": companyID,
+		"is_active":  true,
+	}
 	cursor, err := collection.Find(ctx, filter)
 	if err != nil {
 		return nil, err
@@ -615,6 +642,48 @@ func GetAllVectorDocuments(ctx context.Context, companyID string) ([]VectorDocum
 	}
 
 	return documents, nil
+}
+
+// ToggleVectorDocumentStatus toggles the active status of a vector document
+func ToggleVectorDocumentStatus(ctx context.Context, companyID, pageID, crmURL string, isActive bool) error {
+	collection := database.Collection("vector_documents")
+
+	filter := bson.M{
+		"company_id": companyID,
+		"page_id":    pageID,
+		"crm_url":    crmURL,
+	}
+
+	update := bson.M{
+		"$set": bson.M{
+			"is_active":  isActive,
+			"updated_at": time.Now(),
+		},
+	}
+
+	result, err := collection.UpdateOne(ctx, filter, update)
+	if err != nil {
+		return fmt.Errorf("failed to toggle vector document status: %w", err)
+	}
+
+	if result.MatchedCount == 0 {
+		return fmt.Errorf("vector document not found for CRM URL: %s", crmURL)
+	}
+
+	slog.Info("Toggled vector document status",
+		"companyID", companyID,
+		"pageID", pageID,
+		"crmURL", crmURL,
+		"isActive", isActive,
+	)
+
+	return nil
+}
+
+// SyncVectorDocumentWithCRMLink syncs vector document active status with CRM link status
+func SyncVectorDocumentWithCRMLink(ctx context.Context, companyID, pageID, crmURL string, isActive bool) error {
+	// When a CRM link is toggled, update the corresponding vector document
+	return ToggleVectorDocumentStatus(ctx, companyID, pageID, crmURL, isActive)
 }
 
 // InitVectorDB creates indexes for vector documents collection
