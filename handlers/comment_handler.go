@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"facebook-bot/models"
@@ -31,7 +32,7 @@ type FacebookUser struct {
 
 // HandleComment processes incoming comments and replies
 func HandleComment(change ChangeValue, pageID string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second) // Increased to handle Claude API + Facebook API calls
 	defer cancel()
 
 	commentID := change.CommentID
@@ -85,6 +86,13 @@ func HandleComment(change ChangeValue, pageID string) {
 	pageConfig, err := services.GetPageConfig(company, pageID)
 	if err != nil {
 		slog.Error("Failed to get page configuration", "error", err, "pageID", pageID)
+		return
+	}
+
+	// Check if Facebook comments are enabled for this page
+	if pageConfig.FacebookConfig != nil && !pageConfig.FacebookConfig.IsEnabled {
+		slog.Info("Facebook comments are disabled for this page, skipping bot response",
+			"pageID", pageID)
 		return
 	}
 
@@ -221,33 +229,52 @@ func HandleComment(change ChangeValue, pageID string) {
 		"pageID", pageID,
 	)
 
-	// Fetch RAG context if enabled for this page and has active CRM links
+	// Fetch RAG context based on facebook configuration
 	var ragContext string
-	hasActiveCRMLinks := false
-	for _, crmLink := range pageConfig.CRMLinks {
-		if crmLink.IsActive {
-			hasActiveCRMLinks = true
-			break
+	shouldUseRAG := false
+
+	// Check facebook-specific configuration
+	if pageConfig.FacebookConfig != nil {
+		// Check if RAG is enabled for facebook
+		if pageConfig.FacebookConfig.RAGEnabled {
+			shouldUseRAG = true
 		}
+		// Also check if there are active CRM links for facebook
+		if len(pageConfig.FacebookConfig.CRMLinks) > 0 {
+			for _, link := range pageConfig.FacebookConfig.CRMLinks {
+				if link.IsActive {
+					shouldUseRAG = true
+					break
+				}
+			}
+		}
+	} else {
+		// Fallback to legacy behavior - check for active CRM documents
+		hasActiveCRMDocs, err := services.HasActiveCRMDocumentsForChannel(ctx, company.CompanyID, pageID, "facebook")
+		if err != nil {
+			slog.Warn("Failed to check for active CRM documents", "error", err)
+			hasActiveCRMDocs = false
+		}
+		shouldUseRAG = hasActiveCRMDocs
 	}
 
-	if hasActiveCRMLinks {
-		// Get relevant context based on the user's message, filtered by page ID
-		ragContext, err = services.GetRAGContext(ctx, message, company.CompanyID, pageID)
+	if shouldUseRAG {
+		// Get relevant context based on the user's message, filtered by page ID and channel
+		ragContext, err = services.GetRAGContextForChannel(ctx, message, company.CompanyID, pageID, "facebook")
 		if err != nil {
 			slog.Warn("Failed to fetch RAG context", "error", err)
 			// Continue without RAG context
 		} else if ragContext != "" {
-			slog.Info("RAG context retrieved",
+			slog.Info("RAG context retrieved for facebook",
 				"contextLength", len(ragContext),
 				"companyID", company.CompanyID,
 				"pageID", pageID,
+				"channel", "facebook",
 			)
 		}
-	} else if len(pageConfig.CRMLinks) > 0 {
-		slog.Info("CRM links exist but none are active, skipping RAG context",
+	} else {
+		slog.Info("RAG disabled for facebook on this page",
 			"pageID", pageID,
-			"totalCRMLinks", len(pageConfig.CRMLinks),
 		)
 	}
 
@@ -266,7 +293,7 @@ func HandleComment(change ChangeValue, pageID string) {
 		messageType = "reply"
 	}
 
-	aiResponse, wantsAgent, err := services.GetClaudeResponseWithToolUse(ctx, contextStr, messageType, company, pageConfig, commentHistory, ragContext)
+	aiResponse, _, err := services.GetClaudeResponseWithToolUse(ctx, contextStr, messageType, company, pageConfig, commentHistory, ragContext)
 	if err != nil {
 		slog.Error("Failed to get Claude response", "error", err)
 		if isReply {
@@ -274,15 +301,15 @@ func HandleComment(change ChangeValue, pageID string) {
 		} else {
 			aiResponse = "Thank you for your comment!"
 		}
-		wantsAgent = false
 	}
 
-	// Check if tool detected that customer wants to talk to a real person
-	if wantsAgent {
-		// For comments, we should inform them to send a direct message
-		aiResponse = aiResponse + "\n\nFor personal assistance, please send us a direct message and our team will help you."
+	// For comments, we don't do agent handoff - remove any CUSTOMER_WANTS_REAL_PERSON marker
+	if strings.Contains(aiResponse, "CUSTOMER_WANTS_REAL_PERSON||") {
+		// Remove the marker from the response
+		aiResponse = strings.Replace(aiResponse, "CUSTOMER_WANTS_REAL_PERSON||", "", -1)
+		aiResponse = strings.TrimSpace(aiResponse)
 
-		slog.Info("Comment/Reply detected wanting real person assistance",
+		slog.Info("Removed agent request marker from comment response",
 			"commentID", commentID,
 			"senderID", senderID,
 			"pageID", pageID)

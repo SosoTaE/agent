@@ -128,16 +128,8 @@ func GetClaudeResponseWithConfig(ctx context.Context, input, messageType string,
 		return "", err
 	}
 
-	// Set headers
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-api-key", pageConfig.ClaudeAPIKey)
-	req.Header.Set("anthropic-version", "2023-06-01")
-
-	// Create client with longer timeout
-	client := &http.Client{
-		Timeout: 45 * time.Second, // 45 second timeout for HTTP client
-	}
-	resp, err := client.Do(req)
+	// Use retry logic for API call
+	resp, body, err := callClaudeAPIWithRetry(req, pageConfig.ClaudeAPIKey, 3)
 	if err != nil {
 		// Check if it's a timeout error
 		if os.IsTimeout(err) || strings.Contains(err.Error(), "deadline exceeded") {
@@ -148,12 +140,6 @@ func GetClaudeResponseWithConfig(ctx context.Context, input, messageType string,
 			)
 			return "", fmt.Errorf("Claude API timeout - request took too long. Try with a shorter message")
 		}
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
 		return "", err
 	}
 
@@ -184,6 +170,63 @@ func GetClaudeResponseWithHistory(ctx context.Context, input, messageType string
 	return GetClaudeResponseWithRAG(ctx, input, messageType, company, pageConfig, history, "")
 }
 
+// callClaudeAPIWithRetry makes an API call with retry logic for transient errors
+func callClaudeAPIWithRetry(req *http.Request, apiKey string, maxRetries int) (*http.Response, []byte, error) {
+	client := &http.Client{
+		Timeout: 45 * time.Second,
+	}
+
+	var lastErr error
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		if attempt > 0 {
+			// Exponential backoff: 2^attempt seconds (2s, 4s, 8s)
+			backoff := time.Duration(1<<uint(attempt)) * time.Second
+			slog.Info("Retrying Claude API call",
+				"attempt", attempt+1,
+				"backoff", backoff,
+				"lastError", lastErr)
+			time.Sleep(backoff)
+		}
+
+		// Clone the request for retry
+		reqCopy := req.Clone(req.Context())
+		reqCopy.Header.Set("Content-Type", "application/json")
+		reqCopy.Header.Set("x-api-key", apiKey)
+		reqCopy.Header.Set("anthropic-version", "2023-06-01")
+
+		resp, err := client.Do(reqCopy)
+		if err != nil {
+			lastErr = err
+			// Don't retry on timeout or context cancellation
+			if os.IsTimeout(err) || strings.Contains(err.Error(), "context canceled") {
+				return nil, nil, err
+			}
+			continue
+		}
+
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		// Check for retryable status codes
+		if resp.StatusCode == http.StatusTooManyRequests ||
+			resp.StatusCode == http.StatusServiceUnavailable ||
+			resp.StatusCode == http.StatusGatewayTimeout ||
+			(resp.StatusCode == http.StatusInternalServerError && strings.Contains(string(body), "Overloaded")) {
+			lastErr = fmt.Errorf("Claude API error (retryable): %d - %s", resp.StatusCode, string(body))
+			continue
+		}
+
+		// Success or non-retryable error
+		return resp, body, nil
+	}
+
+	return nil, nil, fmt.Errorf("Claude API failed after %d attempts: %w", maxRetries, lastErr)
+}
+
 // GetClaudeResponseWithToolUse gets a response using tool calling for intent detection
 func GetClaudeResponseWithToolUse(ctx context.Context, input, messageType string, company *models.Company, pageConfig *models.FacebookPage, history []ChatHistory, ragContext string) (string, bool, error) {
 	// Test mode: if API key is "TEST_MODE", return a mock response
@@ -206,7 +249,7 @@ func GetClaudeResponseWithToolUse(ctx context.Context, input, messageType string
 	} else {
 		formattedInput.WriteString("You are a helpful customer service assistant for " + pageConfig.PageName)
 	}
-	formattedInput.WriteString("\n\n")
+	formattedInput.WriteString("\n\nCRITICAL: You MUST respond in the SAME LANGUAGE the customer used in their message. If they write in Georgian, respond in Georgian. If they write in English, respond in English. Match their language exactly.\n\n")
 
 	// Chat History Section
 	if len(history) > 0 {
@@ -242,11 +285,17 @@ func GetClaudeResponseWithToolUse(ctx context.Context, input, messageType string
 	formattedInput.WriteString("   - intent='wants_agent' ONLY if they explicitly ask for a human\n")
 	formattedInput.WriteString("   - intent='continue_bot' for EVERYTHING else (greetings, questions, math, general inquiries)\n")
 	formattedInput.WriteString("3. After using the tool, ALWAYS write a response:\n")
-	formattedInput.WriteString("   - For wants_agent: 'I understand you'd like to speak with a human agent. Let me connect you.'\n")
+	formattedInput.WriteString("   - For wants_agent: 'დაგაკავშირებთ რეალურ ადამიანთან'\n")
 	formattedInput.WriteString("   - For continue_bot: Respond appropriately (greet back, answer questions, etc.)\n")
 
 	if ragContext != "" {
-		formattedInput.WriteString("\nUse the KNOWLEDGE BASE data above to answer questions accurately.\n")
+		formattedInput.WriteString("\n⚠️ CRITICAL KNOWLEDGE BASE ENFORCEMENT ⚠️\n")
+		formattedInput.WriteString("YOU ARE STRICTLY LIMITED TO THE KNOWLEDGE BASE PROVIDED.\n")
+		formattedInput.WriteString("- CHECK: Is the question about information in the KNOWLEDGE BASE above? \n")
+		formattedInput.WriteString("  - IF YES → Answer using ONLY that information\n")
+		formattedInput.WriteString("  - IF NO → You MUST respond with something like: 'I can only provide information about [main topic from knowledge base]. Could you please ask about that instead?'\n")
+		formattedInput.WriteString("- FORBIDDEN: Answering about weather, math, general knowledge, news, or ANYTHING not in the knowledge base\n")
+		formattedInput.WriteString("- REQUIRED: Redirect ALL off-topic questions back to your knowledge base topic\n")
 	}
 
 	// Define the tool for detecting agent requests
@@ -282,8 +331,44 @@ func GetClaudeResponseWithToolUse(ctx context.Context, input, messageType string
 		"   - ONLY detect 'wants_agent' if they EXPLICITLY ask for human/agent/operator/representative\n" +
 		"   - Greetings in ANY language are NOT agent requests - they should be 'continue_bot'\n" +
 		"2. THEN: Write a text response to the customer\n\n" +
-		"If they want an agent: Acknowledge their request politely\n" +
-		"If they don't want an agent: Respond naturally to their message (greet back, answer questions, etc.)\n\n" +
+		"CRITICAL LANGUAGE RULE: You MUST respond in the SAME LANGUAGE the customer used in their message.\n" +
+		"- If the customer writes in Georgian, respond in Georgian\n" +
+		"- If the customer writes in English, respond in English\n" +
+		"- If the customer writes in Russian, respond in Russian\n" +
+		"- Match the customer's language exactly - this is essential for good customer service\n\n"
+
+	// Add RAG-specific instructions to system message
+	if ragContext != "" {
+		systemMessage += "🛒 ONLINE STORE ASSISTANT - STRICT LIMITATIONS 🛒\n" +
+			"You are an online store customer service bot. You can ONLY answer questions about:\n" +
+			"✅ Products in our store\n" +
+			"✅ Prices and discounts\n" +
+			"✅ Shipping and delivery\n" +
+			"✅ Payment methods\n" +
+			"✅ Returns and refunds\n" +
+			"✅ Order status\n" +
+			"✅ Product availability\n" +
+			"✅ Store policies\n\n" +
+			"ABSOLUTELY FORBIDDEN (INSTANT REJECTION):\n" +
+			"❌ Any question NOT about our online store\n" +
+			"❌ Weather, news, general knowledge\n" +
+			"❌ Math problems, calculations (except order totals)\n" +
+			"❌ Personal advice, opinions, recommendations outside our products\n" +
+			"❌ Entertainment, sports, politics, technology\n" +
+			"❌ Anything not directly related to shopping in our store\n\n" +
+			"YOUR ONLY ALLOWED RESPONSE FOR NON-STORE QUESTIONS:\n" +
+			"'I am an online store assistant. I can only help with questions about our products, orders, shipping, and store policies. Please ask me about our store.'\n\n" +
+			"ENFORCEMENT RULES:\n" +
+			"1. BEFORE answering, CHECK: Is this about our ONLINE STORE?\n" +
+			"2. If YES → Is the answer in the knowledge base? → Answer ONLY with that info\n" +
+			"3. If NO → Use the rejection response above\n" +
+			"4. If UNSURE → Use the rejection response above\n" +
+			"5. NEVER discuss topics outside online shopping\n" +
+			"6. ONLY use information from the knowledge base\n\n"
+	}
+
+	systemMessage += "If they want an agent: Acknowledge their request politely in their language\n" +
+		"If they don't want an agent: Respond naturally to their message in their language (greet back, answer questions, etc.)\n\n" +
 		"IMPORTANT: Be very careful - simple greetings like 'hello', 'hi', 'გამარჯობა' are NOT requests for agents!"
 
 	// Create the request with tool
@@ -310,16 +395,8 @@ func GetClaudeResponseWithToolUse(ctx context.Context, input, messageType string
 		return "", false, err
 	}
 
-	// Set headers
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-api-key", pageConfig.ClaudeAPIKey)
-	req.Header.Set("anthropic-version", "2023-06-01")
-
-	// Create client with longer timeout
-	client := &http.Client{
-		Timeout: 45 * time.Second,
-	}
-	resp, err := client.Do(req)
+	// Use retry logic for API call
+	resp, body, err := callClaudeAPIWithRetry(req, pageConfig.ClaudeAPIKey, 3)
 	if err != nil {
 		if os.IsTimeout(err) || strings.Contains(err.Error(), "deadline exceeded") {
 			slog.Error("Claude API timeout with tool use",
@@ -328,12 +405,10 @@ func GetClaudeResponseWithToolUse(ctx context.Context, input, messageType string
 			)
 			return "", false, fmt.Errorf("Claude API timeout - request took too long")
 		}
-		return "", false, err
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
+		slog.Error("Claude API call failed after retries",
+			"error", err,
+			"pageID", pageConfig.PageID,
+			"inputLength", len(input))
 		return "", false, err
 	}
 
@@ -428,7 +503,7 @@ func GetClaudeResponseWithToolUse(ctx context.Context, input, messageType string
 		followUpRequest := ClaudeRequest{
 			Model:     pageConfig.ClaudeModel,
 			MaxTokens: maxTokens,
-			System:    "You are a helpful customer service assistant. Provide a direct, helpful response to the customer.",
+			System:    "You are a helpful customer service assistant. Provide a direct, helpful response to the customer. CRITICAL: Respond in the SAME LANGUAGE the customer used in their message.",
 			Messages: []Message{
 				{
 					Role:    "user",
@@ -523,6 +598,27 @@ func GetClaudeResponseWithRAG(ctx context.Context, input, messageType string, co
 		return "", fmt.Errorf("Claude API key not configured for page %s", pageConfig.PageID)
 	}
 
+	// STRICT PRE-FILTERING: If we have RAG context, check if the question is about online store
+	if ragContext != "" {
+		// Check if question is NOT about online store
+		if !isOnlineStoreQuestion(input, ragContext) {
+			slog.Info("Pre-filtered non-store question",
+				"question", input)
+
+			// Return a standard rejection message for non-store questions
+			rejectionMsg := "I am an online store assistant. I can only help with questions about our products, orders, shipping, and store policies. Please ask me about our store."
+
+			// Match the customer's language if possible
+			if containsGeorgian(input) {
+				rejectionMsg = "მე ვარ ონლაინ მაღაზიის ასისტენტი. შემიძლია დაგეხმაროთ მხოლოდ ჩვენი პროდუქტების, შეკვეთების, მიწოდებისა და მაღაზიის პოლიტიკის შესახებ კითხვებზე."
+			} else if containsRussian(input) {
+				rejectionMsg = "Я ассистент интернет-магазина. Могу помочь только с вопросами о наших товарах, заказах, доставке и политике магазина."
+			}
+
+			return rejectionMsg, nil
+		}
+	}
+
 	// Build formatted input with clear labels
 	var formattedInput strings.Builder
 
@@ -532,7 +628,7 @@ func GetClaudeResponseWithRAG(ctx context.Context, input, messageType string, co
 	if pageConfig.SystemPrompt == "" {
 		formattedInput.WriteString("You are a helpful customer service assistant for " + pageConfig.PageName)
 	}
-	formattedInput.WriteString("\n\n")
+	formattedInput.WriteString("\n\nCRITICAL LANGUAGE RULE: You MUST respond in the SAME LANGUAGE the customer used in their message. If they write in Georgian, respond in Georgian. If they write in English, respond in English. If they write in Russian, respond in Russian. Match their language exactly.\n\n")
 
 	// Post Context Section (if from comment)
 	if messageType == "comment" {
@@ -570,11 +666,31 @@ func GetClaudeResponseWithRAG(ctx context.Context, input, messageType string, co
 
 	// Response Instructions
 	formattedInput.WriteString("INSTRUCTIONS:\n")
-	formattedInput.WriteString("Please provide a helpful response based on the information above. ")
 	if ragContext != "" {
-		formattedInput.WriteString("Use the RAG DATA to answer accurately. Do not make up information not present in the RAG DATA. ")
+		formattedInput.WriteString("🛒 ONLINE STORE ASSISTANT MODE 🛒\n\n")
+		formattedInput.WriteString("DECISION FLOWCHART:\n")
+		formattedInput.WriteString("┌─ Is this about ONLINE SHOPPING/STORE?\n")
+		formattedInput.WriteString("├─ NO → Reply: 'I am an online store assistant. I can only help with questions about our products, orders, shipping, and store policies.'\n")
+		formattedInput.WriteString("├─ MAYBE → Reply: 'I am an online store assistant. I can only help with questions about our products, orders, shipping, and store policies.'\n")
+		formattedInput.WriteString("└─ YES → Is this about OUR store specifically?\n")
+		formattedInput.WriteString("    ├─ NO → Reply: 'I am an online store assistant. I can only help with questions about our products, orders, shipping, and store policies.'\n")
+		formattedInput.WriteString("    └─ YES → Is the answer in the RAG DATA?\n")
+		formattedInput.WriteString("        ├─ NO → Reply: 'I am an online store assistant. I can only help with questions about our products, orders, shipping, and store policies.'\n")
+		formattedInput.WriteString("        └─ YES → Answer using ONLY the RAG DATA\n\n")
+		formattedInput.WriteString("NON-STORE TOPICS (INSTANT REJECTION):\n")
+		formattedInput.WriteString("× Weather/Climate → REJECT\n")
+		formattedInput.WriteString("× News/Politics → REJECT\n")
+		formattedInput.WriteString("× Math (except prices) → REJECT\n")
+		formattedInput.WriteString("× Entertainment → REJECT\n")
+		formattedInput.WriteString("× General knowledge → REJECT\n")
+		formattedInput.WriteString("× Personal advice (non-shopping) → REJECT\n")
+		formattedInput.WriteString("× ANYTHING not about our online store → REJECT\n\n")
+		formattedInput.WriteString("YOUR IDENTITY: You are ONLY a shopping assistant for THIS online store. Nothing else.\n")
+	} else {
+		formattedInput.WriteString("Please provide a helpful response based on the information above. ")
+		formattedInput.WriteString("Be professional and friendly. ")
 	}
-	formattedInput.WriteString("Be professional and friendly.")
+	formattedInput.WriteString("Respond in the customer's language.")
 
 	// Get the complete formatted prompt
 	systemPrompt := formattedInput.String()
@@ -601,10 +717,45 @@ func GetClaudeResponseWithRAG(ctx context.Context, input, messageType string, co
 		},
 	}
 
+	// Create system message for RAG
+	var systemMsg string
+	if ragContext != "" {
+		systemMsg = "🛒 YOU ARE AN ONLINE STORE ASSISTANT - EXTREME RESTRICTIONS 🛒\n\n" +
+			"You work EXCLUSIVELY for an online store. You can ONLY discuss:\n" +
+			"• Products we sell\n" +
+			"• Prices and promotions\n" +
+			"• Shipping/delivery options\n" +
+			"• Payment methods\n" +
+			"• Returns/refunds/exchanges\n" +
+			"• Order tracking\n" +
+			"• Product availability\n" +
+			"• Store policies\n\n" +
+			"CRITICAL RULE: If the question is NOT about online shopping → REJECT IT\n\n" +
+			"REJECTION PROTOCOL:\n" +
+			"1. Question NOT about our store? → 'I am an online store assistant. I can only help with questions about our products, orders, shipping, and store policies.'\n" +
+			"2. Question about store but answer not in knowledge base? → Same rejection\n" +
+			"3. Unsure if it's store-related? → Same rejection\n\n" +
+			"FORBIDDEN TOPICS (AUTOMATIC REJECTION):\n" +
+			"⛔ Weather, news, general knowledge\n" +
+			"⛔ Math (except calculating order totals)\n" +
+			"⛔ Personal advice unrelated to shopping\n" +
+			"⛔ Entertainment, sports, politics\n" +
+			"⛔ Technology (unless selling tech products)\n" +
+			"⛔ ANYTHING not about online shopping\n\n" +
+			"VERIFICATION BEFORE EVERY RESPONSE:\n" +
+			"☐ Is this about our ONLINE STORE? If NO → REJECT\n" +
+			"☐ Is this about shopping/products/orders? If NO → REJECT\n" +
+			"☐ Is the answer in the knowledge base? If NO → REJECT\n\n" +
+			"You are a shopping assistant, NOT a general AI. Stay in character."
+	} else {
+		systemMsg = "You are a helpful customer service assistant. Always respond in the SAME LANGUAGE the customer used."
+	}
+
 	// Create the request
 	requestBody := ClaudeRequest{
 		Model:     pageConfig.ClaudeModel,
 		MaxTokens: maxTokens,
+		System:    systemMsg,
 		Messages:  messages,
 	}
 
@@ -952,9 +1103,9 @@ Do not include any other text in your response.`
 	req.Header.Set("x-api-key", apiKey)
 	req.Header.Set("anthropic-version", "2023-06-01")
 
-	// Create client with shorter timeout for intent detection
+	// Create client with appropriate timeout for intent detection with tools
 	client := &http.Client{
-		Timeout: 10 * time.Second,
+		Timeout: 30 * time.Second, // Increased from 10s to handle tool calls properly
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -987,4 +1138,244 @@ Do not include any other text in your response.`
 	}
 
 	return "", fmt.Errorf("no response content from Claude for intent detection")
+}
+
+// extractMainTopic tries to identify the main topic from RAG context
+func extractMainTopic(ragContext string) string {
+	// Take first 200 characters to identify topic
+	preview := ragContext
+	if len(ragContext) > 200 {
+		preview = ragContext[:200]
+	}
+
+	// Look for common topic indicators
+	lowerPreview := strings.ToLower(preview)
+	if strings.Contains(lowerPreview, "property") || strings.Contains(lowerPreview, "apartment") || strings.Contains(lowerPreview, "real estate") {
+		return "properties and real estate"
+	} else if strings.Contains(lowerPreview, "product") || strings.Contains(lowerPreview, "catalog") || strings.Contains(lowerPreview, "item") {
+		return "our products and services"
+	} else if strings.Contains(lowerPreview, "service") || strings.Contains(lowerPreview, "support") {
+		return "our services"
+	} else if strings.Contains(lowerPreview, "company") || strings.Contains(lowerPreview, "about") {
+		return "our company information"
+	}
+
+	// Default fallback
+	return "the information in our knowledge base"
+}
+
+// isOffTopicQuestion checks if a question is clearly off-topic based on common patterns
+func isOffTopicQuestion(question, ragContext string) bool {
+	lowerQuestion := strings.ToLower(question)
+	lowerRAG := strings.ToLower(ragContext)
+
+	// List of clearly off-topic question patterns
+	offTopicPatterns := []string{
+		// Weather
+		"weather", "temperature", "forecast", "rain", "snow", "sunny", "cloudy",
+		"ამინდი", "ტემპერატურა", "წვიმა", "თოვლი", // Georgian weather terms
+		"погода", "температура", "дождь", "снег", // Russian weather terms
+
+		// Math and calculations (unless RAG is about math)
+		"calculate", "solve", "equation", "math", "algebra", "geometry",
+		"გამოთვალე", "ამოხსენი", "განტოლება", // Georgian math terms
+		"вычислить", "решить", "уравнение", // Russian math terms
+
+		// General knowledge
+		"capital of", "president", "population", "history of", "when was", "who invented",
+		"დედაქალაქი", "პრეზიდენტი", "მოსახლეობა", // Georgian general knowledge
+		"столица", "президент", "население", // Russian general knowledge
+
+		// Personal advice
+		"should i", "what do you think", "your opinion", "advice about", "recommend me",
+		"რა ვქნა", "რას მირჩევ", // Georgian advice
+		"что делать", "посоветуй", // Russian advice
+
+		// Current events (unless RAG is news)
+		"latest news", "today's news", "current events", "what happened",
+		"ახალი ამბები", "დღეს რა მოხდა", // Georgian news
+		"новости", "что случилось", // Russian news
+
+		// Programming/Tech (unless RAG is about tech)
+		"write code", "python", "javascript", "debug", "programming",
+		"კოდი", "პროგრამირება", // Georgian programming
+		"код", "программирование", // Russian programming
+
+		// Entertainment
+		"movie", "song", "game", "sport", "football", "basketball",
+		"ფილმი", "სიმღერა", "თამაში", "სპორტი", // Georgian entertainment
+		"фильм", "песня", "игра", "спорт", // Russian entertainment
+	}
+
+	// Check if question contains off-topic patterns
+	for _, pattern := range offTopicPatterns {
+		if strings.Contains(lowerQuestion, pattern) {
+			// But check if this pattern is actually IN the RAG context
+			if !strings.Contains(lowerRAG, pattern) {
+				slog.Debug("Off-topic pattern detected",
+					"pattern", pattern,
+					"question", question)
+				return true
+			}
+		}
+	}
+
+	// Check for questions that are too general or philosophical
+	philosophicalPatterns := []string{
+		"meaning of life", "what is love", "why do we exist", "purpose of",
+		"სიცოცხლის აზრი", "რა არის სიყვარული", // Georgian philosophical
+		"смысл жизни", "что такое любовь", // Russian philosophical
+	}
+
+	for _, pattern := range philosophicalPatterns {
+		if strings.Contains(lowerQuestion, pattern) {
+			return true
+		}
+	}
+
+	// Check if question is just greeting or small talk (these are OK)
+	greetings := []string{
+		"hello", "hi", "hey", "good morning", "good evening",
+		"გამარჯობა", "სალამი", "დილა მშვიდობისა", // Georgian greetings
+		"привет", "здравствуйте", "добрый день", // Russian greetings
+	}
+
+	for _, greeting := range greetings {
+		if strings.TrimSpace(lowerQuestion) == greeting {
+			return false // Greetings are allowed
+		}
+	}
+
+	return false
+}
+
+// isOnlineStoreQuestion checks if a question is related to online store/shopping
+func isOnlineStoreQuestion(question, ragContext string) bool {
+	lowerQuestion := strings.ToLower(question)
+
+	// Online store related keywords that indicate valid questions
+	storeKeywords := []string{
+		// Products and shopping
+		"product", "item", "buy", "purchase", "order", "cart", "checkout",
+		"price", "cost", "discount", "sale", "promo", "coupon", "deal",
+		"stock", "available", "availability", "in stock", "out of stock",
+
+		// Shipping and delivery
+		"ship", "shipping", "delivery", "deliver", "track", "tracking",
+		"express", "standard", "overnight", "international",
+
+		// Payment
+		"pay", "payment", "credit card", "debit", "paypal", "visa", "mastercard",
+		"billing", "invoice", "receipt",
+
+		// Returns and support
+		"return", "refund", "exchange", "warranty", "guarantee",
+		"cancel", "cancellation", "customer service", "support",
+
+		// Store policies
+		"policy", "policies", "terms", "conditions", "privacy",
+
+		// Georgian shopping terms
+		"პროდუქტი", "ყიდვა", "შეკვეთა", "ფასი", "მიწოდება", "გადახდა",
+		"დაბრუნება", "გაცვლა", "ფასდაკლება",
+
+		// Russian shopping terms
+		"товар", "продукт", "купить", "заказ", "цена", "доставка",
+		"оплата", "возврат", "обмен", "скидка", "корзина",
+
+		// Categories (common in online stores)
+		"category", "categories", "brand", "size", "color", "model",
+		"კატეგორია", "ზომა", "ფერი", // Georgian
+		"категория", "размер", "цвет", // Russian
+	}
+
+	// Check if question contains store-related keywords
+	hasStoreKeyword := false
+	for _, keyword := range storeKeywords {
+		if strings.Contains(lowerQuestion, keyword) {
+			hasStoreKeyword = true
+			break
+		}
+	}
+
+	// List of clearly NON-store topics that override store keywords
+	nonStoreTopics := []string{
+		// Weather
+		"weather", "temperature", "forecast", "rain", "snow", "sunny",
+		"ამინდი", "ტემპერატურა", "წვიმა", // Georgian
+		"погода", "температура", "дождь", // Russian
+
+		// News and current events
+		"news", "politics", "president", "election", "war", "covid",
+		"ახალი ამბები", "პოლიტიკა", // Georgian
+		"новости", "политика", // Russian
+
+		// Entertainment
+		"movie", "film", "song", "music", "game", "sport", "football",
+		"ფილმი", "სიმღერა", "თამაში", "სპორტი", // Georgian
+		"фильм", "песня", "игра", "спорт", // Russian
+
+		// General knowledge
+		"capital of", "population", "history", "when was", "who invented",
+		"დედაქალაქი", "მოსახლეობა", "ისტორია", // Georgian
+		"столица", "население", "история", // Russian
+
+		// Math/Science (unless about pricing)
+		"equation", "formula", "theorem", "physics", "chemistry",
+		"განტოლება", "ფორმულა", "ფიზიკა", // Georgian
+		"уравнение", "формула", "физика", // Russian
+
+		// Personal/Philosophical
+		"meaning of life", "love", "happiness", "depression",
+		"სიცოცხლის აზრი", "სიყვარული", // Georgian
+		"смысл жизни", "любовь", // Russian
+	}
+
+	// Check for non-store topics
+	for _, topic := range nonStoreTopics {
+		if strings.Contains(lowerQuestion, topic) {
+			// Even if it has store keywords, these topics override
+			return false
+		}
+	}
+
+	// Special case: greetings are OK even without store keywords
+	greetings := []string{
+		"hello", "hi", "hey", "good morning", "good evening", "how are you",
+		"გამარჯობა", "სალამი", "როგორ ხარ", // Georgian
+		"привет", "здравствуйте", "как дела", // Russian
+	}
+
+	for _, greeting := range greetings {
+		if strings.Contains(lowerQuestion, greeting) {
+			return true // Allow greetings
+		}
+	}
+
+	// If no store keywords found and not a greeting, it's probably off-topic
+	if !hasStoreKeyword {
+		return false
+	}
+
+	return true
+}
+
+// containsGeorgian checks if text contains Georgian characters
+func containsGeorgian(text string) bool {
+	for _, r := range text {
+		if r >= 0x10A0 && r <= 0x10FF {
+			return true
+		}
+	}
+	return false
+}
+
+// containsRussian checks if text contains Cyrillic characters
+func containsRussian(text string) bool {
+	for _, r := range text {
+		if (r >= 0x0400 && r <= 0x04FF) || (r >= 0x0500 && r <= 0x052F) {
+			return true
+		}
+	}
+	return false
 }

@@ -4,6 +4,7 @@ import (
 	"facebook-bot/models"
 	"facebook-bot/services"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -77,14 +78,27 @@ func Login(c *fiber.Ctx) error {
 		})
 	}
 
+	// Detect if we're using ngrok or cross-origin setup
+	origin := c.Get("Origin", "")
+	isNgrok := strings.Contains(origin, "ngrok") || strings.Contains(c.Hostname(), "ngrok")
+	isCrossOrigin := origin != "" && !strings.HasPrefix(origin, "http://"+c.Hostname()) && !strings.HasPrefix(origin, "https://"+c.Hostname())
+
+	// Set appropriate SameSite based on environment
+	sameSite := "Lax"
+	secure := false
+	if isNgrok || isCrossOrigin {
+		sameSite = "None"
+		secure = true // Must be true when SameSite=None
+	}
+
 	// Set session cookie
 	c.Cookie(&fiber.Cookie{
 		Name:     services.SessionCookieName,
 		Value:    session.SessionID,
 		Expires:  session.ExpiresAt,
 		HTTPOnly: true,
-		Secure:   false, // Set to true in production with HTTPS
-		SameSite: "Lax",
+		Secure:   secure,
+		SameSite: sameSite,
 		Path:     "/",
 	})
 
@@ -122,14 +136,27 @@ func Logout(c *fiber.Ctx) error {
 		slog.Error("Failed to destroy session", "error", err)
 	}
 
+	// Detect if we're using ngrok or cross-origin setup (same as login)
+	origin := c.Get("Origin", "")
+	isNgrok := strings.Contains(origin, "ngrok") || strings.Contains(c.Hostname(), "ngrok")
+	isCrossOrigin := origin != "" && !strings.HasPrefix(origin, "http://"+c.Hostname()) && !strings.HasPrefix(origin, "https://"+c.Hostname())
+
+	// Set appropriate SameSite based on environment
+	sameSite := "Lax"
+	secure := false
+	if isNgrok || isCrossOrigin {
+		sameSite = "None"
+		secure = true
+	}
+
 	// Clear session cookie
 	c.Cookie(&fiber.Cookie{
 		Name:     services.SessionCookieName,
 		Value:    "",
 		Expires:  time.Now().Add(-1 * time.Hour),
 		HTTPOnly: true,
-		Secure:   false, // Set to true in production with HTTPS
-		SameSite: "Lax",
+		Secure:   secure,
+		SameSite: sameSite,
 		Path:     "/",
 	})
 

@@ -75,6 +75,13 @@ func HandleMessage(messaging Messaging, pageID string) {
 		return
 	}
 
+	// Check if Messenger is enabled for this page
+	if pageConfig.MessengerConfig != nil && !pageConfig.MessengerConfig.IsEnabled {
+		slog.Info("Messenger is disabled for this page, skipping bot response",
+			"pageID", pageID)
+		return
+	}
+
 	slog.Info("Handling message",
 		"senderID", senderID,
 		"pageID", pageID,
@@ -243,33 +250,52 @@ func HandleMessage(messaging Messaging, pageID string) {
 		"pageID", pageID,
 	)
 
-	// Fetch RAG context if enabled for this company and has active CRM links
+	// Fetch RAG context based on messenger configuration
 	var ragContext string
-	hasActiveCRMLinks := false
-	for _, crmLink := range pageConfig.CRMLinks {
-		if crmLink.IsActive {
-			hasActiveCRMLinks = true
-			break
+	shouldUseRAG := false
+
+	// Check messenger-specific configuration
+	if pageConfig.MessengerConfig != nil {
+		// Check if RAG is enabled for messenger
+		if pageConfig.MessengerConfig.RAGEnabled {
+			shouldUseRAG = true
 		}
+		// Also check if there are active CRM links for messenger
+		if len(pageConfig.MessengerConfig.CRMLinks) > 0 {
+			for _, link := range pageConfig.MessengerConfig.CRMLinks {
+				if link.IsActive {
+					shouldUseRAG = true
+					break
+				}
+			}
+		}
+	} else {
+		// Fallback to legacy behavior - check for active CRM documents
+		hasActiveCRMDocs, err := services.HasActiveCRMDocumentsForChannel(ctx, company.CompanyID, pageID, "messenger")
+		if err != nil {
+			slog.Warn("Failed to check for active CRM documents", "error", err)
+			hasActiveCRMDocs = false
+		}
+		shouldUseRAG = hasActiveCRMDocs
 	}
 
-	if hasActiveCRMLinks {
-		// Get relevant context based on the user's message, filtered by page ID
-		ragContext, err = services.GetRAGContext(ctx, messageText, company.CompanyID, pageID)
+	if shouldUseRAG {
+		// Get relevant context based on the user's message, filtered by page ID and channel
+		ragContext, err = services.GetRAGContextForChannel(ctx, messageText, company.CompanyID, pageID, "messenger")
 		if err != nil {
 			slog.Warn("Failed to fetch RAG context", "error", err)
 			// Continue without RAG context
 		} else if ragContext != "" {
-			slog.Info("RAG context retrieved",
+			slog.Info("RAG context retrieved for messenger",
 				"contextLength", len(ragContext),
 				"companyID", company.CompanyID,
 				"pageID", pageID,
+				"channel", "messenger",
 			)
 		}
-	} else if len(pageConfig.CRMLinks) > 0 {
-		slog.Info("CRM links exist but none are active, skipping RAG context",
+	} else {
+		slog.Info("RAG disabled for messenger on this page",
 			"pageID", pageID,
-			"totalCRMLinks", len(pageConfig.CRMLinks),
 		)
 	}
 
@@ -294,8 +320,8 @@ func HandleMessage(messaging Messaging, pageID string) {
 				"pageID", pageID)
 		}
 
-		// Append a message to the response indicating human assistance will be provided
-		aiResponse = aiResponse + "\n\nI've notified our human support team. Someone will assist you shortly."
+		// Clear the AI response - don't send any message to customer when they want a real agent
+		aiResponse = ""
 
 		// Broadcast notification about human assistance request
 		wsManager.BroadcastToCompany(company.CompanyID, services.BroadcastMessage{
@@ -325,10 +351,11 @@ func HandleMessage(messaging Messaging, pageID string) {
 		}
 	}
 
-	// Response delay removed for faster processing
-	// Send response back via Messenger immediately
-	if err := services.SendMessengerReply(ctx, senderID, aiResponse, pageConfig.PageAccessToken); err != nil {
-		slog.Error("Failed to send messenger reply", "error", err)
+	// Only send a reply if there's a message to send
+	if aiResponse != "" {
+		if err := services.SendMessengerReply(ctx, senderID, aiResponse, pageConfig.PageAccessToken); err != nil {
+			slog.Error("Failed to send messenger reply", "error", err)
+		}
 	}
 
 	// Save bot's response as a message in the database (only if not empty)
@@ -610,8 +637,16 @@ func GetCustomerConversation(c *fiber.Ctx) error {
 			"message":      msg.Message,
 			"timestamp":    msg.Timestamp,
 			"is_bot":       msg.IsBot,
+			"is_human":     msg.IsHuman,
 			"sender_id":    msg.SenderID,
 			"recipient_id": msg.RecipientID,
+		}
+
+		// Add agent details if it's a human message
+		if msg.IsHuman {
+			msgData["agent_id"] = msg.AgentID
+			msgData["agent_email"] = msg.AgentEmail
+			msgData["agent_name"] = msg.AgentName
 		}
 
 		// Determine if this is from customer or bot

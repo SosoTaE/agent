@@ -79,6 +79,13 @@ type PropertyResponseEnhancers struct {
 func GetEnhancedPropertyPrompt(companyName string, includeRAGInstructions bool) string {
 	basePrompt := `You are a professional real estate consultant for ` + companyName + `.
 
+LANGUAGE MATCHING RULE:
+You MUST respond in the SAME LANGUAGE the customer uses:
+- If they write in Georgian → respond in Georgian
+- If they write in English → respond in English  
+- If they write in Russian → respond in Russian
+- Always match the customer's language for better service
+
 CORE RESPONSIBILITIES:
 1. Property Information Expert: Provide accurate, detailed information about available properties
 2. Customer Needs Analysis: Understand customer requirements and match them with suitable properties

@@ -26,7 +26,9 @@ type VectorDocument struct {
 	Embedding []float32          `bson:"embedding" json:"embedding"`
 	Metadata  map[string]string  `bson:"metadata" json:"metadata"`
 	Source    string             `bson:"source" json:"source"`                       // "crm", "product", "faq", etc.
+	Channels  []string           `bson:"channels" json:"channels"`                   // Array of enabled channels: ["facebook", "messenger"] or just ["facebook"] or ["messenger"]
 	CRMURL    string             `bson:"crm_url,omitempty" json:"crm_url,omitempty"` // URL of the CRM link this document came from
+	CRMID     string             `bson:"crm_id,omitempty" json:"crm_id,omitempty"`   // ID of the CRM link this document belongs to
 	IsActive  bool               `bson:"is_active" json:"is_active"`                 // Whether this document should be used in searches
 	CreatedAt time.Time          `bson:"created_at" json:"created_at"`
 	UpdatedAt time.Time          `bson:"updated_at" json:"updated_at"`
@@ -121,6 +123,38 @@ func StoreEmbeddings(ctx context.Context, companyID, pageID, content, source str
 
 // StoreEmbeddingsWithOptions stores document embeddings with additional options
 func StoreEmbeddingsWithOptions(ctx context.Context, companyID, pageID, content, source string, metadata map[string]string, crmURL string, isActive bool) error {
+	// Call the new function with empty channel for backward compatibility
+	return StoreEmbeddingsWithChannelAndOptions(ctx, companyID, pageID, "", content, source, metadata, crmURL, isActive)
+}
+
+// StoreEmbeddingsWithChannelAndOptions stores embeddings with channel specification
+func StoreEmbeddingsWithChannelAndOptions(ctx context.Context, companyID, pageID, channel, content, source string, metadata map[string]string, crmURL string, isActive bool) error {
+	// Convert single channel to array for backward compatibility
+	channels := []string{}
+	if channel != "" {
+		channels = []string{channel}
+	}
+	return StoreEmbeddingsWithChannelsAndOptions(ctx, companyID, pageID, channels, content, source, metadata, crmURL, isActive)
+}
+
+// StoreEmbeddingsWithCRMID stores embeddings with CRM ID specification
+func StoreEmbeddingsWithCRMID(ctx context.Context, companyID, pageID, channel, content, source string, metadata map[string]string, crmURL, crmID string, isActive bool) error {
+	// Convert single channel to array for backward compatibility
+	channels := []string{}
+	if channel != "" {
+		channels = []string{channel}
+	}
+	return StoreEmbeddingsWithChannelsAndCRMID(ctx, companyID, pageID, channels, content, source, metadata, crmURL, crmID, isActive)
+}
+
+// StoreEmbeddingsWithChannelsAndOptions stores embeddings with multiple channels
+func StoreEmbeddingsWithChannelsAndOptions(ctx context.Context, companyID, pageID string, channels []string, content, source string, metadata map[string]string, crmURL string, isActive bool) error {
+	// Call the new function with empty CRM ID for backward compatibility
+	return StoreEmbeddingsWithChannelsAndCRMID(ctx, companyID, pageID, channels, content, source, metadata, crmURL, "", isActive)
+}
+
+// StoreEmbeddingsWithChannelsAndCRMID stores embeddings with multiple channels and CRM ID
+func StoreEmbeddingsWithChannelsAndCRMID(ctx context.Context, companyID, pageID string, channels []string, content, source string, metadata map[string]string, crmURL, crmID string, isActive bool) error {
 	collection := database.Collection("vector_documents")
 
 	// Generate embeddings using company's configured provider
@@ -129,14 +163,24 @@ func StoreEmbeddingsWithOptions(ctx context.Context, companyID, pageID, content,
 		return fmt.Errorf("failed to generate embeddings: %w", err)
 	}
 
+	// If no channels specified, default to both
+	if len(channels) == 0 {
+		channels = []string{"facebook", "messenger"}
+	}
+
+	// Normalize channels before storing
+	channels = normalizeChannels(channels)
+
 	doc := VectorDocument{
 		CompanyID: companyID,
 		PageID:    pageID,
+		Channels:  channels,
 		Content:   content,
 		Embedding: embedding,
 		Metadata:  metadata,
 		Source:    source,
 		CRMURL:    crmURL,
+		CRMID:     crmID,
 		IsActive:  isActive,
 		CreatedAt: time.Now(),
 		UpdatedAt: time.Now(),
@@ -499,6 +543,93 @@ func GetRAGContext(ctx context.Context, query string, companyID string, pageID s
 	return ragContext, nil
 }
 
+// GetRAGContextForChannel retrieves relevant context for a query filtered by channel
+func GetRAGContextForChannel(ctx context.Context, query string, companyID string, pageID string, channel string) (string, error) {
+	// Search using stored embeddings with cosine similarity filtered by channel
+	results, err := SearchWithStoredEmbeddingsForChannel(ctx, query, companyID, pageID, channel, 5)
+	if err != nil {
+		slog.Error("Failed to search with stored embeddings", "error", err)
+		return "", err
+	}
+
+	if len(results) == 0 {
+		slog.Info("No relevant context found for query",
+			"query", query,
+			"companyID", companyID,
+			"pageID", pageID,
+			"channel", channel,
+		)
+		return "", nil
+	}
+
+	// Build context from multiple results for comprehensive coverage
+	var contexts []string
+	totalLength := 0
+	maxContextLength := 10000 // Max total context to prevent token overflow
+
+	for i, result := range results {
+		// Include confidence score to help AI gauge relevance
+		confidence := "very high"
+		if result.Score < 0.8 {
+			confidence = "high"
+		}
+		if result.Score < 0.6 {
+			confidence = "medium"
+		}
+		if result.Score < 0.4 {
+			confidence = "low"
+		}
+
+		// For top results, include more content
+		extractSize := 3000
+		if i > 0 {
+			extractSize = 2000 // Less for lower-ranked results
+		}
+		if i > 2 {
+			extractSize = 1000 // Even less for results 4+
+		}
+
+		// Extract relevant portion of the document
+		relevantContent := extractRelevantPortion(result.Content, query, extractSize)
+
+		// Check if adding this would exceed max length
+		contextEntry := fmt.Sprintf("[Result %d - Source: %s, Relevance: %s (%.3f)]\n%s",
+			i+1, result.Source, confidence, result.Score, relevantContent)
+
+		if totalLength+len(contextEntry) > maxContextLength {
+			break // Stop adding more context to prevent overflow
+		}
+
+		contexts = append(contexts, contextEntry)
+		totalLength += len(contextEntry)
+	}
+
+	ragContext := strings.Join(contexts, "\n\n---\n\n")
+
+	// Log detailed RAG information for debugging
+	slog.Info("RAG context retrieved for channel",
+		"query", query,
+		"queryLength", len(query),
+		"contextLength", len(ragContext),
+		"sources", len(results),
+		"topScore", results[0].Score,
+		"companyID", companyID,
+		"pageID", pageID,
+		"channel", channel,
+	)
+
+	// Debug log to see what content is being retrieved
+	if len(ragContext) > 0 {
+		preview := ragContext
+		if len(preview) > 200 {
+			preview = preview[:200] + "..."
+		}
+		slog.Debug("RAG context preview", "content", preview)
+	}
+
+	return ragContext, nil
+}
+
 // extractRelevantPortion extracts the most relevant portion of content based on query
 func extractRelevantPortion(content, query string, maxLength int) string {
 	if len(content) <= maxLength {
@@ -680,10 +811,239 @@ func ToggleVectorDocumentStatus(ctx context.Context, companyID, pageID, crmURL s
 	return nil
 }
 
+// HasActiveCRMDocuments checks if there are any active CRM documents in the vector database for a given page
+func HasActiveCRMDocuments(ctx context.Context, companyID, pageID string) (bool, error) {
+	collection := database.Collection("vector_documents")
+
+	filter := bson.M{
+		"company_id": companyID,
+		"page_id":    pageID,
+		"source":     "crm",
+		"is_active":  true,
+	}
+
+	count, err := collection.CountDocuments(ctx, filter)
+	if err != nil {
+		return false, fmt.Errorf("failed to count active CRM documents: %w", err)
+	}
+
+	return count > 0, nil
+}
+
+// HasActiveCRMDocumentsForChannel checks if there are active CRM documents for a specific channel
+func HasActiveCRMDocumentsForChannel(ctx context.Context, companyID, pageID, channel string) (bool, error) {
+	collection := database.Collection("vector_documents")
+
+	// Check if channel is in the channels array
+	filter := bson.M{
+		"company_id": companyID,
+		"page_id":    pageID,
+		"channels":   channel, // MongoDB will check if channel is in the channels array
+		"source":     "crm",
+		"is_active":  true,
+	}
+
+	count, err := collection.CountDocuments(ctx, filter)
+	if err != nil {
+		return false, fmt.Errorf("failed to count active CRM documents: %w", err)
+	}
+
+	return count > 0, nil
+}
+
+// UpdateVectorDocumentChannels updates the channels array for documents matching the filename
+func UpdateVectorDocumentChannels(ctx context.Context, companyID, pageID, filename string, channels []string) (int64, error) {
+	collection := database.Collection("vector_documents")
+
+	// Normalize channels before updating
+	channels = normalizeChannels(channels)
+
+	// Find and update all documents with this filename
+	filter := bson.M{
+		"company_id":        companyID,
+		"page_id":           pageID,
+		"metadata.filename": filename,
+	}
+
+	update := bson.M{
+		"$set": bson.M{
+			"channels":   channels,
+			"updated_at": time.Now(),
+		},
+	}
+
+	result, err := collection.UpdateMany(ctx, filter, update)
+	if err != nil {
+		return 0, fmt.Errorf("failed to update document channels: %w", err)
+	}
+
+	slog.Info("Updated document channels",
+		"companyID", companyID,
+		"pageID", pageID,
+		"filename", filename,
+		"channels", channels,
+		"updatedCount", result.ModifiedCount,
+	)
+
+	return result.ModifiedCount, nil
+}
+
 // SyncVectorDocumentWithCRMLink syncs vector document active status with CRM link status
 func SyncVectorDocumentWithCRMLink(ctx context.Context, companyID, pageID, crmURL string, isActive bool) error {
 	// When a CRM link is toggled, update the corresponding vector document
 	return ToggleVectorDocumentStatus(ctx, companyID, pageID, crmURL, isActive)
+}
+
+// DeleteVectorDocumentByContent deletes a vector document by its content
+func DeleteVectorDocumentByContent(ctx context.Context, companyID, pageID, content string) (int64, error) {
+	collection := database.Collection("vector_documents")
+
+	result, err := collection.DeleteOne(ctx, bson.M{
+		"company_id": companyID,
+		"page_id":    pageID,
+		"content":    content,
+	})
+
+	if err != nil {
+		return 0, fmt.Errorf("failed to delete vector document: %w", err)
+	}
+
+	return result.DeletedCount, nil
+}
+
+// DeleteVectorDocumentsByMetadata deletes vector documents by metadata field
+func DeleteVectorDocumentsByMetadata(ctx context.Context, companyID, pageID, metadataKey, metadataValue string) (int64, error) {
+	collection := database.Collection("vector_documents")
+
+	filter := bson.M{
+		"company_id":                            companyID,
+		"page_id":                               pageID,
+		fmt.Sprintf("metadata.%s", metadataKey): metadataValue,
+	}
+
+	result, err := collection.DeleteMany(ctx, filter)
+	if err != nil {
+		return 0, fmt.Errorf("failed to delete vector documents: %w", err)
+	}
+
+	return result.DeletedCount, nil
+}
+
+// normalizeChannels ensures channel values are properly formatted
+func normalizeChannels(channels []string) []string {
+	if channels == nil {
+		return []string{}
+	}
+
+	normalized := make([]string, 0, len(channels))
+	for _, ch := range channels {
+		// Normalize channel names to lowercase
+		ch = strings.ToLower(strings.TrimSpace(ch))
+
+		// Fix common misspellings and ensure correct values
+		switch ch {
+		case "facebook", "fb":
+			normalized = append(normalized, "facebook")
+		case "messenger", "messanger", "msg":
+			normalized = append(normalized, "messenger")
+		}
+	}
+
+	// Remove duplicates
+	seen := make(map[string]bool)
+	result := []string{}
+	for _, ch := range normalized {
+		if !seen[ch] {
+			seen[ch] = true
+			result = append(result, ch)
+		}
+	}
+
+	return result
+}
+
+// GetVectorDocuments retrieves all vector documents for a page
+func GetVectorDocuments(ctx context.Context, companyID, pageID string) ([]VectorDocument, error) {
+	collection := database.Collection("vector_documents")
+
+	filter := bson.M{
+		"company_id": companyID,
+		"page_id":    pageID,
+	}
+
+	cursor, err := collection.Find(ctx, filter, options.Find().SetSort(bson.M{"created_at": -1}))
+	if err != nil {
+		return nil, fmt.Errorf("failed to retrieve vector documents: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	var documents []VectorDocument
+	if err := cursor.All(ctx, &documents); err != nil {
+		return nil, fmt.Errorf("failed to decode vector documents: %w", err)
+	}
+
+	// Normalize channels for each document
+	for i := range documents {
+		documents[i].Channels = normalizeChannels(documents[i].Channels)
+	}
+
+	return documents, nil
+}
+
+// ToggleVectorDocumentByID toggles the active status of a single document by ID
+func ToggleVectorDocumentByID(ctx context.Context, documentID string, isActive bool) (int64, error) {
+	collection := database.Collection("vector_documents")
+
+	// Convert string ID to ObjectID
+	objID, err := primitive.ObjectIDFromHex(documentID)
+	if err != nil {
+		return 0, fmt.Errorf("invalid document ID: %w", err)
+	}
+
+	result, err := collection.UpdateOne(
+		ctx,
+		bson.M{"_id": objID},
+		bson.M{
+			"$set": bson.M{
+				"is_active":  isActive,
+				"updated_at": time.Now(),
+			},
+		},
+	)
+
+	if err != nil {
+		return 0, fmt.Errorf("failed to toggle document status: %w", err)
+	}
+
+	return result.ModifiedCount, nil
+}
+
+// ToggleVectorDocumentsByMetadata toggles the active status of documents by metadata field
+func ToggleVectorDocumentsByMetadata(ctx context.Context, companyID, pageID, metadataKey, metadataValue string, isActive bool) (int64, error) {
+	collection := database.Collection("vector_documents")
+
+	filter := bson.M{
+		"company_id":                            companyID,
+		"page_id":                               pageID,
+		fmt.Sprintf("metadata.%s", metadataKey): metadataValue,
+	}
+
+	result, err := collection.UpdateMany(
+		ctx,
+		filter,
+		bson.M{
+			"$set": bson.M{
+				"is_active":  isActive,
+				"updated_at": time.Now(),
+			},
+		},
+	)
+
+	if err != nil {
+		return 0, fmt.Errorf("failed to toggle documents status: %w", err)
+	}
+
+	return result.ModifiedCount, nil
 }
 
 // InitVectorDB creates indexes for vector documents collection

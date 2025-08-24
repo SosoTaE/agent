@@ -21,7 +21,7 @@ type Message struct {
 	Message       string                 `bson:"message" json:"message"`
 	ProcessedData map[string]interface{} `bson:"processed_data,omitempty" json:"processed_data,omitempty"` // For CRM data processing results
 	IsBot         bool                   `bson:"is_bot" json:"is_bot"`                                     // true if message is from bot
-	IsHuman       bool                   `bson:"is_human,omitempty" json:"is_human,omitempty"`             // true if message is from human agent via dashboard
+	IsHuman       bool                   `bson:"is_human" json:"is_human"`                                 // true if message is from human agent via dashboard
 	Source        string                 `bson:"source,omitempty" json:"source,omitempty"`                 // Source of message: "dashboard", "facebook", "bot", etc.
 	AgentID       string                 `bson:"agent_id,omitempty" json:"agent_id,omitempty"`             // ID of human agent who sent the message
 	AgentEmail    string                 `bson:"agent_email,omitempty" json:"agent_email,omitempty"`       // Email of human agent
