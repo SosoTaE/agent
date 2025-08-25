@@ -66,7 +66,7 @@ type CRMLink struct {
 	Name        string            `bson:"name" json:"name"`
 	URL         string            `bson:"url" json:"url"`
 	Type        string            `bson:"type" json:"type"`         // api, webhook, database, file
-	Channels    []string          `bson:"channels" json:"channels"` // ["facebook", "messenger"] or subset
+	Channels    map[string]bool   `bson:"channels" json:"channels"` // {"facebook": true, "messenger": false} - true means enabled for that channel
 	APIKey      string            `bson:"api_key,omitempty" json:"api_key,omitempty"`
 	Headers     map[string]string `bson:"headers,omitempty" json:"headers,omitempty"`
 	Description string            `bson:"description,omitempty" json:"description,omitempty"`

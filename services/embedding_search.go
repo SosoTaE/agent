@@ -263,12 +263,15 @@ func searchByTextOnly(documents []VectorDocument, query string, limit int) []Sea
 func SearchWithStoredEmbeddingsForChannel(ctx context.Context, query string, companyID string, pageID string, channel string, limit int) ([]SearchResult, error) {
 	collection := database.Collection("vector_documents")
 
-	// Fetch all active documents that have this channel in their channels array
+	// Normalize the channel name
+	channel = normalizeChannel(channel)
+
+	// Fetch all active documents that have this channel enabled
 	filter := bson.M{
-		"company_id": companyID,
-		"page_id":    pageID,
-		"channels":   channel, // MongoDB checks if channel is in the channels array
-		"is_active":  true,
+		"company_id":          companyID,
+		"page_id":             pageID,
+		"channels." + channel: true, // Check if the channel is enabled in the channels map
+		"is_active":           true,
 	}
 
 	cursor, err := collection.Find(ctx, filter)

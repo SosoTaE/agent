@@ -102,15 +102,17 @@ func main() {
 	// Middleware
 	app.Use(recover.New())
 
-	// CORS configuration - Allow frontend development server and ngrok
 	app.Use(cors.New(cors.Config{
-		AllowOrigins:     "http://192.168.100.3:50000, http://188.169.35.136:50000, http://localhost:5174, https://*.ngrok.io, https://*.ngrok-free.app",
-		AllowMethods:     "GET,POST,PUT,DELETE,OPTIONS,PATCH",
-		AllowHeaders:     "Origin, Content-Type, Accept, Authorization, X-Requested-With, ngrok-skip-browser-warning",
+		// Allow requests from your frontend's origin
+		AllowOrigins: "http://localhost:5173",
+
+		// Add this line to allow credentials
 		AllowCredentials: true,
-		ExposeHeaders:    "Content-Length, Content-Type, X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset, Set-Cookie",
-		MaxAge:           86400, // 24 hours
+
+		// Specify allowed headers
+		AllowHeaders: "Origin, Content-Type, Accept, Authorization", // Added Authorization as it's common
 	}))
+	// ---------------
 
 	app.Use(logger.New(logger.Config{
 		Format: "[${time}] ${status} - ${method} ${path}\n",
@@ -189,14 +191,10 @@ func main() {
 	dashboard.Put("/pages/:pageID/crm-links", handlers.UpdateCRMLink)        // Update or add CRM link
 
 	// RAG Document Management endpoints
-	dashboard.Post("/rag/upload", handlers.UploadRAGDocument)                       // Upload file for RAG processing
-	dashboard.Delete("/rag/document", handlers.DeleteRAGDocument)                   // Delete RAG document
-	dashboard.Get("/rag/documents", handlers.ListRAGDocuments)                      // List all RAG documents for a page
-	dashboard.Put("/rag/document/toggle", handlers.ToggleRAGDocument)               // Toggle RAG document active status
-	dashboard.Put("/rag/document/channels", handlers.UpdateRAGDocumentChannels)     // Update which channels a document is active for
-	dashboard.Get("/rag/documents/details", handlers.GetRAGDocumentDetails)         // Get detailed RAG document information
-	dashboard.Put("/rag/document/toggle-by-id", handlers.ToggleRAGDocumentByID)     // Toggle document by ID
-	dashboard.Get("/rag/documents/by-filename", handlers.GetRAGDocumentsByFilename) // Get documents by filename
+	dashboard.Post("/rag/upload", handlers.UploadRAGDocument)                     // Upload file for RAG processing
+	dashboard.Delete("/rag/document", handlers.DeleteRAGDocument)                 // Delete RAG document
+	dashboard.Put("/rag/document/toggle-channel", handlers.ToggleDocumentChannel) // Simple toggle for document channel
+	dashboard.Get("/rag/files", handlers.GetAllRAGFiles)                          // Get all RAG files with channel data
 
 	// New CRM and RAG Management endpoints
 	dashboard.Get("/crm-links", handlers.GetCRMLinksForChannel)      // Get CRM links for a specific channel
@@ -204,7 +202,6 @@ func main() {
 	dashboard.Put("/crm-links/status", handlers.UpdateCRMLinkStatus) // Update CRM link status
 	dashboard.Delete("/crm-links", handlers.DeleteCRMLink)           // Delete CRM link
 	dashboard.Get("/crm-links/all", handlers.GetAllCRMData)          // Get all CRM data for all pages
-	dashboard.Get("/rag/documents/all", handlers.GetAllRAGDocuments) // Get all RAG documents for all pages
 
 	// WebSocket endpoint (requires authentication)
 	dashboard.Get("/ws", handlers.WebSocketUpgrade, websocket.New(handlers.HandleWebSocket))

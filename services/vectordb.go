@@ -26,7 +26,7 @@ type VectorDocument struct {
 	Embedding []float32          `bson:"embedding" json:"embedding"`
 	Metadata  map[string]string  `bson:"metadata" json:"metadata"`
 	Source    string             `bson:"source" json:"source"`                       // "crm", "product", "faq", etc.
-	Channels  []string           `bson:"channels" json:"channels"`                   // Array of enabled channels: ["facebook", "messenger"] or just ["facebook"] or ["messenger"]
+	Channels  map[string]bool    `bson:"channels" json:"channels"`                   // {"facebook": true, "messenger": false} - true means enabled for that channel
 	CRMURL    string             `bson:"crm_url,omitempty" json:"crm_url,omitempty"` // URL of the CRM link this document came from
 	CRMID     string             `bson:"crm_id,omitempty" json:"crm_id,omitempty"`   // ID of the CRM link this document belongs to
 	IsActive  bool               `bson:"is_active" json:"is_active"`                 // Whether this document should be used in searches
@@ -163,18 +163,29 @@ func StoreEmbeddingsWithChannelsAndCRMID(ctx context.Context, companyID, pageID 
 		return fmt.Errorf("failed to generate embeddings: %w", err)
 	}
 
-	// If no channels specified, default to both
+	// Convert channels array to map
+	channelMap := make(map[string]bool)
 	if len(channels) == 0 {
-		channels = []string{"facebook", "messenger"}
+		// If no channels specified, default to both enabled
+		channelMap["facebook"] = true
+		channelMap["messenger"] = true
+	} else {
+		// Initialize all channels as false first
+		channelMap["facebook"] = false
+		channelMap["messenger"] = false
+		// Then set the specified channels to true
+		for _, ch := range channels {
+			ch = normalizeChannel(ch)
+			if ch == "facebook" || ch == "messenger" {
+				channelMap[ch] = true
+			}
+		}
 	}
-
-	// Normalize channels before storing
-	channels = normalizeChannels(channels)
 
 	doc := VectorDocument{
 		CompanyID: companyID,
 		PageID:    pageID,
-		Channels:  channels,
+		Channels:  channelMap,
 		Content:   content,
 		Embedding: embedding,
 		Metadata:  metadata,
@@ -834,13 +845,16 @@ func HasActiveCRMDocuments(ctx context.Context, companyID, pageID string) (bool,
 func HasActiveCRMDocumentsForChannel(ctx context.Context, companyID, pageID, channel string) (bool, error) {
 	collection := database.Collection("vector_documents")
 
-	// Check if channel is in the channels array
+	// Normalize the channel name
+	channel = normalizeChannel(channel)
+
+	// Check if channel is enabled in the channels map
 	filter := bson.M{
-		"company_id": companyID,
-		"page_id":    pageID,
-		"channels":   channel, // MongoDB will check if channel is in the channels array
-		"source":     "crm",
-		"is_active":  true,
+		"company_id":          companyID,
+		"page_id":             pageID,
+		"channels." + channel: true, // Check if the channel is enabled in the channels map
+		"source":              "crm",
+		"is_active":           true,
 	}
 
 	count, err := collection.CountDocuments(ctx, filter)
@@ -855,8 +869,19 @@ func HasActiveCRMDocumentsForChannel(ctx context.Context, companyID, pageID, cha
 func UpdateVectorDocumentChannels(ctx context.Context, companyID, pageID, filename string, channels []string) (int64, error) {
 	collection := database.Collection("vector_documents")
 
-	// Normalize channels before updating
-	channels = normalizeChannels(channels)
+	// Convert channels array to map
+	channelMap := make(map[string]bool)
+	// Initialize both channels as false
+	channelMap["facebook"] = false
+	channelMap["messenger"] = false
+
+	// Set specified channels to true
+	for _, ch := range channels {
+		ch = normalizeChannel(ch)
+		if ch == "facebook" || ch == "messenger" {
+			channelMap[ch] = true
+		}
+	}
 
 	// Find and update all documents with this filename
 	filter := bson.M{
@@ -867,7 +892,7 @@ func UpdateVectorDocumentChannels(ctx context.Context, companyID, pageID, filena
 
 	update := bson.M{
 		"$set": bson.M{
-			"channels":   channels,
+			"channels":   channelMap,
 			"updated_at": time.Now(),
 		},
 	}
@@ -882,6 +907,64 @@ func UpdateVectorDocumentChannels(ctx context.Context, companyID, pageID, filena
 		"pageID", pageID,
 		"filename", filename,
 		"channels", channels,
+		"updatedCount", result.ModifiedCount,
+	)
+
+	return result.ModifiedCount, nil
+}
+
+// UpdateVectorDocumentChannelValue updates a specific channel value for documents matching the filename
+func UpdateVectorDocumentChannelValue(ctx context.Context, companyID, pageID, filename, platform string, value bool) (int64, error) {
+	collection := database.Collection("vector_documents")
+
+	// Normalize the platform name
+	platform = normalizeChannel(platform)
+	if platform != "facebook" && platform != "messenger" {
+		return 0, fmt.Errorf("invalid platform: %s", platform)
+	}
+
+	// Find all documents with this filename
+	filter := bson.M{
+		"company_id":        companyID,
+		"page_id":           pageID,
+		"metadata.filename": filename,
+	}
+
+	// First, get the current documents to preserve other channel values
+	cursor, err := collection.Find(ctx, filter)
+	if err != nil {
+		return 0, fmt.Errorf("failed to find documents: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	var documents []VectorDocument
+	if err := cursor.All(ctx, &documents); err != nil {
+		return 0, fmt.Errorf("failed to decode documents: %w", err)
+	}
+
+	if len(documents) == 0 {
+		return 0, nil // No documents found
+	}
+
+	// Update the specific channel value while preserving others
+	update := bson.M{
+		"$set": bson.M{
+			"channels." + platform: value,
+			"updated_at":           time.Now(),
+		},
+	}
+
+	result, err := collection.UpdateMany(ctx, filter, update)
+	if err != nil {
+		return 0, fmt.Errorf("failed to update document channel value: %w", err)
+	}
+
+	slog.Info("Updated document channel value",
+		"companyID", companyID,
+		"pageID", pageID,
+		"filename", filename,
+		"platform", platform,
+		"value", value,
 		"updatedCount", result.ModifiedCount,
 	)
 
@@ -930,36 +1013,58 @@ func DeleteVectorDocumentsByMetadata(ctx context.Context, companyID, pageID, met
 }
 
 // normalizeChannels ensures channel values are properly formatted
-func normalizeChannels(channels []string) []string {
+// normalizeChannel normalizes a single channel name
+func normalizeChannel(channel string) string {
+	// Normalize channel names to lowercase
+	ch := strings.ToLower(strings.TrimSpace(channel))
+
+	// Fix common misspellings and ensure correct values
+	switch ch {
+	case "facebook", "fb":
+		return "facebook"
+	case "messenger", "messanger", "msg":
+		return "messenger"
+	default:
+		return ch
+	}
+}
+
+func normalizeChannels(channels map[string]bool) map[string]bool {
 	if channels == nil {
-		return []string{}
+		return make(map[string]bool)
 	}
 
-	normalized := make([]string, 0, len(channels))
-	for _, ch := range channels {
-		// Normalize channel names to lowercase
-		ch = strings.ToLower(strings.TrimSpace(ch))
-
-		// Fix common misspellings and ensure correct values
-		switch ch {
-		case "facebook", "fb":
-			normalized = append(normalized, "facebook")
-		case "messenger", "messanger", "msg":
-			normalized = append(normalized, "messenger")
+	normalized := make(map[string]bool)
+	for ch, enabled := range channels {
+		ch = normalizeChannel(ch)
+		if ch == "facebook" || ch == "messenger" {
+			normalized[ch] = enabled
 		}
 	}
 
-	// Remove duplicates
-	seen := make(map[string]bool)
-	result := []string{}
-	for _, ch := range normalized {
-		if !seen[ch] {
-			seen[ch] = true
-			result = append(result, ch)
-		}
+	return normalized
+}
+
+// GetAllVectorDocumentsByCompany retrieves all vector documents for a company
+func GetAllVectorDocumentsByCompany(ctx context.Context, companyID string) ([]VectorDocument, error) {
+	collection := database.Collection("vector_documents")
+
+	filter := bson.M{
+		"company_id": companyID,
 	}
 
-	return result
+	cursor, err := collection.Find(ctx, filter)
+	if err != nil {
+		return nil, fmt.Errorf("failed to find vector documents: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	var documents []VectorDocument
+	if err := cursor.All(ctx, &documents); err != nil {
+		return nil, fmt.Errorf("failed to decode vector documents: %w", err)
+	}
+
+	return documents, nil
 }
 
 // GetVectorDocuments retrieves all vector documents for a page
