@@ -250,52 +250,26 @@ func HandleMessage(messaging Messaging, pageID string) {
 		"pageID", pageID,
 	)
 
-	// Fetch RAG context based on messenger configuration
+	// Check vector database for available RAG documents and retrieve context if found
 	var ragContext string
-	shouldUseRAG := false
 
-	// Check messenger-specific configuration
-	if pageConfig.MessengerConfig != nil {
-		// Check if RAG is enabled for messenger
-		if pageConfig.MessengerConfig.RAGEnabled {
-			shouldUseRAG = true
-		}
-		// Also check if there are active CRM links for messenger
-		if len(pageConfig.MessengerConfig.CRMLinks) > 0 {
-			for _, link := range pageConfig.MessengerConfig.CRMLinks {
-				if link.IsActive {
-					shouldUseRAG = true
-					break
-				}
-			}
-		}
-	} else {
-		// Fallback to legacy behavior - check for active CRM documents
-		hasActiveCRMDocs, err := services.HasActiveCRMDocumentsForChannel(ctx, company.CompanyID, pageID, "messenger")
-		if err != nil {
-			slog.Warn("Failed to check for active CRM documents", "error", err)
-			hasActiveCRMDocs = false
-		}
-		shouldUseRAG = hasActiveCRMDocs
-	}
-
-	if shouldUseRAG {
-		// Get relevant context based on the user's message, filtered by page ID and channel
-		ragContext, err = services.GetRAGContextForChannel(ctx, messageText, company.CompanyID, pageID, "messenger")
-		if err != nil {
-			slog.Warn("Failed to fetch RAG context", "error", err)
-			// Continue without RAG context
-		} else if ragContext != "" {
-			slog.Info("RAG context retrieved for messenger",
-				"contextLength", len(ragContext),
-				"companyID", company.CompanyID,
-				"pageID", pageID,
-				"channel", "messenger",
-			)
-		}
-	} else {
-		slog.Info("RAG disabled for messenger on this page",
+	// Try to get relevant context from vector database
+	ragContext, err = services.GetRAGContextForChannel(ctx, messageText, company.CompanyID, pageID, "messenger")
+	if err != nil {
+		slog.Warn("Failed to fetch RAG context from vector DB", "error", err)
+		// Continue without RAG context
+	} else if ragContext != "" {
+		slog.Info("RAG context retrieved from vector DB",
+			"contextLength", len(ragContext),
+			"companyID", company.CompanyID,
 			"pageID", pageID,
+			"channel", "messenger",
+		)
+	} else {
+		slog.Debug("No relevant RAG documents found in vector DB",
+			"query", messageText,
+			"pageID", pageID,
+			"channel", "messenger",
 		)
 	}
 

@@ -104,7 +104,7 @@ func main() {
 
 	app.Use(cors.New(cors.Config{
 		// Allow requests from your frontend's origin
-		AllowOrigins: "http://localhost:5173",
+		AllowOrigins: "http://localhost:5173, http://192.168.100.3:50000, http://188.169.35.136:50000",
 
 		// Add this line to allow credentials
 		AllowCredentials: true,

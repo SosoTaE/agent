@@ -1067,6 +1067,24 @@ func GetAllVectorDocumentsByCompany(ctx context.Context, companyID string) ([]Ve
 	return documents, nil
 }
 
+// CheckRAGDocumentExists checks if a RAG document with specific metadata exists
+func CheckRAGDocumentExists(ctx context.Context, companyID, pageID, metadataKey, metadataValue string) (bool, error) {
+	collection := database.Collection("vector_documents")
+
+	filter := bson.M{
+		"company_id":              companyID,
+		"page_id":                 pageID,
+		"metadata." + metadataKey: metadataValue,
+	}
+
+	count, err := collection.CountDocuments(ctx, filter)
+	if err != nil {
+		return false, fmt.Errorf("failed to check document existence: %w", err)
+	}
+
+	return count > 0, nil
+}
+
 // GetVectorDocuments retrieves all vector documents for a page
 func GetVectorDocuments(ctx context.Context, companyID, pageID string) ([]VectorDocument, error) {
 	collection := database.Collection("vector_documents")

@@ -174,6 +174,11 @@ func HandleComment(change ChangeValue, pageID string) {
 		postContent = ""
 	}
 
+	// Process and store post content as RAG document if it's substantial
+	if postContent != "" && len(postContent) > 100 {
+		go processPostContentAsRAG(company.CompanyID, pageID, postID, postContent)
+	}
+
 	// Check if we've already responded to this comment
 	alreadyProcessed, err := services.CheckCommentProcessed(ctx, commentID)
 	if err != nil {
@@ -229,52 +234,26 @@ func HandleComment(change ChangeValue, pageID string) {
 		"pageID", pageID,
 	)
 
-	// Fetch RAG context based on facebook configuration
+	// Check vector database for available RAG documents and retrieve context if found
 	var ragContext string
-	shouldUseRAG := false
 
-	// Check facebook-specific configuration
-	if pageConfig.FacebookConfig != nil {
-		// Check if RAG is enabled for facebook
-		if pageConfig.FacebookConfig.RAGEnabled {
-			shouldUseRAG = true
-		}
-		// Also check if there are active CRM links for facebook
-		if len(pageConfig.FacebookConfig.CRMLinks) > 0 {
-			for _, link := range pageConfig.FacebookConfig.CRMLinks {
-				if link.IsActive {
-					shouldUseRAG = true
-					break
-				}
-			}
-		}
-	} else {
-		// Fallback to legacy behavior - check for active CRM documents
-		hasActiveCRMDocs, err := services.HasActiveCRMDocumentsForChannel(ctx, company.CompanyID, pageID, "facebook")
-		if err != nil {
-			slog.Warn("Failed to check for active CRM documents", "error", err)
-			hasActiveCRMDocs = false
-		}
-		shouldUseRAG = hasActiveCRMDocs
-	}
-
-	if shouldUseRAG {
-		// Get relevant context based on the user's message, filtered by page ID and channel
-		ragContext, err = services.GetRAGContextForChannel(ctx, message, company.CompanyID, pageID, "facebook")
-		if err != nil {
-			slog.Warn("Failed to fetch RAG context", "error", err)
-			// Continue without RAG context
-		} else if ragContext != "" {
-			slog.Info("RAG context retrieved for facebook",
-				"contextLength", len(ragContext),
-				"companyID", company.CompanyID,
-				"pageID", pageID,
-				"channel", "facebook",
-			)
-		}
-	} else {
-		slog.Info("RAG disabled for facebook on this page",
+	// Try to get relevant context from vector database
+	ragContext, err = services.GetRAGContextForChannel(ctx, message, company.CompanyID, pageID, "facebook")
+	if err != nil {
+		slog.Warn("Failed to fetch RAG context from vector DB", "error", err)
+		// Continue without RAG context
+	} else if ragContext != "" {
+		slog.Info("RAG context retrieved from vector DB",
+			"contextLength", len(ragContext),
+			"companyID", company.CompanyID,
 			"pageID", pageID,
+			"channel", "facebook",
+		)
+	} else {
+		slog.Debug("No relevant RAG documents found in vector DB",
+			"query", message,
+			"pageID", pageID,
+			"channel", "facebook",
 		)
 	}
 
@@ -353,4 +332,143 @@ func HandleComment(change ChangeValue, pageID string) {
 	if err := services.SaveResponse(ctx, responseDoc); err != nil {
 		slog.Error("Failed to save response", "error", err)
 	}
+}
+
+// processPostContentAsRAG processes Facebook post content as RAG document using the same algorithm as file uploads
+func processPostContentAsRAG(companyID, pageID, postID, content string) {
+	// Create a new context for background processing
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	// Check if post content already exists in RAG database
+	exists, err := services.CheckRAGDocumentExists(ctx, companyID, pageID, "post_id", postID)
+	if err != nil {
+		slog.Error("Failed to check if post RAG exists", "error", err, "postID", postID)
+		return
+	}
+
+	if exists {
+		slog.Debug("Post content already processed as RAG", "postID", postID)
+		return
+	}
+
+	slog.Info("Processing Facebook post content as RAG document",
+		"companyID", companyID,
+		"pageID", pageID,
+		"postID", postID,
+		"contentLength", len(content),
+	)
+
+	// Split content into chunks using the same algorithm as document uploads
+	chunks := splitPostIntoChunks(content, 2000) // 2000 chars per chunk
+
+	// Metadata for the post
+	metadata := map[string]string{
+		"post_id":     postID,
+		"source_type": "facebook_post",
+		"created_at":  time.Now().Format(time.RFC3339),
+	}
+
+	// Both Facebook and Messenger channels for post content
+	channels := []string{"facebook", "messenger"}
+
+	var storedCount int
+	var errors []string
+
+	for i, chunk := range chunks {
+		// Add chunk info to metadata
+		chunkMetadata := make(map[string]string)
+		for k, v := range metadata {
+			chunkMetadata[k] = v
+		}
+		if len(chunks) > 1 {
+			chunkMetadata["chunk"] = fmt.Sprintf("%d/%d", i+1, len(chunks))
+		}
+
+		// Store embedding for this chunk with channels
+		err := services.StoreEmbeddingsWithChannelsAndOptions(
+			ctx,
+			companyID,
+			pageID,
+			channels,
+			chunk,
+			"facebook_post",
+			chunkMetadata,
+			"",   // No CRM URL for posts
+			true, // Set as active by default
+		)
+
+		if err != nil {
+			errors = append(errors, fmt.Sprintf("Chunk %d: %v", i+1, err))
+			slog.Error("Failed to store post embedding for chunk",
+				"chunk", i+1,
+				"error", err,
+				"companyID", companyID,
+				"pageID", pageID,
+				"postID", postID,
+			)
+		} else {
+			storedCount++
+			slog.Debug("Stored post embedding for chunk",
+				"chunk", i+1,
+				"total", len(chunks),
+				"postID", postID,
+			)
+		}
+	}
+
+	// Log completion
+	if len(errors) > 0 {
+		slog.Warn("Post RAG processing completed with errors",
+			"companyID", companyID,
+			"pageID", pageID,
+			"postID", postID,
+			"chunks_total", len(chunks),
+			"chunks_stored", storedCount,
+			"errors", len(errors),
+		)
+	} else {
+		slog.Info("Post RAG processing completed successfully",
+			"companyID", companyID,
+			"pageID", pageID,
+			"postID", postID,
+			"chunks_total", len(chunks),
+			"chunks_stored", storedCount,
+		)
+	}
+}
+
+// splitPostIntoChunks splits post content into chunks (same algorithm as document uploads)
+func splitPostIntoChunks(text string, chunkSize int) []string {
+	if len(text) <= chunkSize {
+		return []string{text}
+	}
+
+	var chunks []string
+	words := strings.Fields(text)
+
+	var currentChunk strings.Builder
+	for _, word := range words {
+		// Check if adding this word would exceed chunk size
+		if currentChunk.Len()+len(word)+1 > chunkSize {
+			// Save current chunk if it has content
+			if currentChunk.Len() > 0 {
+				chunks = append(chunks, currentChunk.String())
+				currentChunk.Reset()
+			}
+		}
+
+		// Add word to current chunk
+		if currentChunk.Len() > 0 {
+			currentChunk.WriteString(" ")
+		}
+		currentChunk.WriteString(word)
+	}
+
+	// Add the last chunk if it has content
+	if currentChunk.Len() > 0 {
+		chunks = append(chunks, currentChunk.String())
+	}
+
+	return chunks
 }
