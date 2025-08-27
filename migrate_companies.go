@@ -17,6 +17,8 @@ type OldCompany struct {
 	ClaudeModel     string             `bson:"claude_model"`
 	VoyageAPIKey    string             `bson:"voyage_api_key,omitempty"`
 	VoyageModel     string             `bson:"voyage_model,omitempty"`
+	GPTAPIKey       string             `bson:"gpt_api_key,omitempty"`
+	GPTModel        string             `bson:"gpt_model,omitempty"`
 	SystemPrompt    string             `bson:"system_prompt,omitempty"`
 	CRMLinks        []interface{}      `bson:"crm_links,omitempty"`
 	IsActive        bool               `bson:"is_active"`
@@ -48,6 +50,8 @@ type NewCompany struct {
 	ClaudeModel     string             `bson:"claude_model"`
 	VoyageAPIKey    string             `bson:"voyage_api_key,omitempty"`
 	VoyageModel     string             `bson:"voyage_model,omitempty"`
+	GPTAPIKey       string             `bson:"gpt_api_key,omitempty"`
+	GPTModel        string             `bson:"gpt_model,omitempty"`
 	SystemPrompt    string             `bson:"system_prompt,omitempty"`
 	CRMLinks        []interface{}      `bson:"crm_links,omitempty"`
 	IsActive        bool               `bson:"is_active"`

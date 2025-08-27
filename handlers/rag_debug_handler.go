@@ -97,19 +97,39 @@ func TestRAGRetrieval(c *fiber.Ctx) error {
 	}
 
 	return c.JSON(fiber.Map{
-		"query":              req.Query,
-		"page_id":            req.PageID,
-		"company":            company.CompanyName,
-		"results_found":      len(results),
-		"search_results":     searchResults,
-		"rag_context_length": len(ragContext),
-		"rag_context":        ragContext,
-		"voyage_configured":  len(company.Pages) > 0 && company.Pages[0].VoyageAPIKey != "",
-		"voyage_model": func() string {
+		"query":                req.Query,
+		"page_id":              req.PageID,
+		"company":              company.CompanyName,
+		"results_found":        len(results),
+		"search_results":       searchResults,
+		"rag_context_length":   len(ragContext),
+		"rag_context":          ragContext,
+		"embedding_configured": len(company.Pages) > 0 && (company.Pages[0].VoyageAPIKey != "" || company.Pages[0].GPTAPIKey != ""),
+		"embedding_provider": func() string {
 			if len(company.Pages) > 0 {
-				return company.Pages[0].VoyageModel
+				if company.Pages[0].GPTAPIKey != "" {
+					return "OpenAI GPT"
+				} else if company.Pages[0].VoyageAPIKey != "" {
+					return "Voyage AI"
+				}
 			}
-			return ""
+			return "Mock"
+		}(),
+		"embedding_model": func() string {
+			if len(company.Pages) > 0 {
+				if company.Pages[0].GPTAPIKey != "" {
+					if company.Pages[0].GPTModel != "" {
+						return company.Pages[0].GPTModel
+					}
+					return "text-embedding-3-large"
+				} else if company.Pages[0].VoyageAPIKey != "" {
+					if company.Pages[0].VoyageModel != "" {
+						return company.Pages[0].VoyageModel
+					}
+					return "voyage-2"
+				}
+			}
+			return "mock-embeddings"
 		}(),
 	})
 }

@@ -97,7 +97,7 @@ func TestVoyageEmbedding(c *fiber.Ctx) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Get company to check Voyage configuration
+	// Get company to check embedding configuration
 	company, err := services.GetCompanyByID(ctx, companyID)
 	if err != nil {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
@@ -105,24 +105,40 @@ func TestVoyageEmbedding(c *fiber.Ctx) error {
 		})
 	}
 
-	// Get first page for Voyage configuration
-	var voyageModel string
+	// Get first page for embedding configuration
+	var embeddingModel string
+	var embeddingProvider string
 	if len(company.Pages) > 0 {
-		voyageModel = company.Pages[0].VoyageModel
+		if company.Pages[0].GPTAPIKey != "" {
+			embeddingProvider = "OpenAI GPT"
+			embeddingModel = company.Pages[0].GPTModel
+			if embeddingModel == "" {
+				embeddingModel = "text-embedding-3-large"
+			}
+		} else if company.Pages[0].VoyageAPIKey != "" {
+			embeddingProvider = "Voyage AI"
+			embeddingModel = company.Pages[0].VoyageModel
+			if embeddingModel == "" {
+				embeddingModel = "voyage-2"
+			}
+		} else {
+			embeddingProvider = "Mock"
+			embeddingModel = "mock-embeddings"
+		}
 	}
 
-	// Generate embedding using Voyage (use empty pageID to get default page)
+	// Generate embedding (use empty pageID to get default page)
 	embedding, err := services.GetEmbeddings(ctx, req.Text, companyID, "")
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": "Failed to generate Voyage embedding: " + err.Error(),
+			"error": "Failed to generate embedding: " + err.Error(),
 		})
 	}
 
 	return c.JSON(fiber.Map{
-		"message":        "Voyage embedding generated successfully",
-		"provider":       "Voyage AI",
-		"model":          voyageModel,
+		"message":        "Embedding generated successfully",
+		"provider":       embeddingProvider,
+		"model":          embeddingModel,
 		"text":           req.Text,
 		"embedding_size": len(embedding),
 		"sample":         embedding[:10], // Show first 10 values as sample

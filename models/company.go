@@ -34,6 +34,8 @@ type FacebookPage struct {
 	ClaudeModel     string `bson:"claude_model" json:"claude_model"`
 	VoyageAPIKey    string `bson:"voyage_api_key,omitempty" json:"voyage_api_key,omitempty"`
 	VoyageModel     string `bson:"voyage_model,omitempty" json:"voyage_model,omitempty"`
+	GPTAPIKey       string `bson:"gpt_api_key,omitempty" json:"gpt_api_key,omitempty"`
+	GPTModel        string `bson:"gpt_model,omitempty" json:"gpt_model,omitempty"`
 	SystemPrompt    string `bson:"system_prompt,omitempty" json:"system_prompt,omitempty"`
 	IsActive        bool   `bson:"is_active" json:"is_active"`
 	MaxTokens       int    `bson:"max_tokens" json:"max_tokens"`

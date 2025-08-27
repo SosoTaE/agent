@@ -31,6 +31,8 @@ type PageFullRequest struct {
 	ClaudeModel     string `json:"claude_model"`
 	VoyageAPIKey    string `json:"voyage_api_key,omitempty"`
 	VoyageModel     string `json:"voyage_model,omitempty"`
+	GPTAPIKey       string `json:"gpt_api_key,omitempty"`
+	GPTModel        string `json:"gpt_model,omitempty"`
 	SystemPrompt    string `json:"system_prompt,omitempty"`
 	IsActive        bool   `json:"is_active"`
 	MaxTokens       int    `json:"max_tokens"`
@@ -45,6 +47,8 @@ type PageUpdateRequest struct {
 	ClaudeModel     string `json:"claude_model,omitempty"`
 	VoyageAPIKey    string `json:"voyage_api_key,omitempty"`
 	VoyageModel     string `json:"voyage_model,omitempty"`
+	GPTAPIKey       string `json:"gpt_api_key,omitempty"`
+	GPTModel        string `json:"gpt_model,omitempty"`
 	SystemPrompt    string `json:"system_prompt,omitempty"`
 	IsActive        *bool  `json:"is_active,omitempty"`
 	MaxTokens       *int   `json:"max_tokens,omitempty"`
@@ -56,7 +60,7 @@ func AdminCreateUser(c *fiber.Ctx) error {
 	userRole := c.Locals("role")
 	if userRole != string(models.RoleCompanyAdmin) {
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
-			"error": "Only company admins can create users",
+			"error": "მხოლოდ კომპანიის ადმინისტრატორებს შეუძლიათ მომხმარებლების შექმნა",
 		})
 	}
 
@@ -77,7 +81,7 @@ func AdminCreateUser(c *fiber.Ctx) error {
 	// Parse request body
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error":   "Invalid request body",
+			"error":   "არასწორი მოთხოვნის ტექსტი",
 			"details": err.Error(),
 		})
 	}
@@ -85,8 +89,8 @@ func AdminCreateUser(c *fiber.Ctx) error {
 	// Validate role
 	if !models.IsValidRole(req.Role) {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error":   "Invalid role",
-			"details": "Role must be one of: company_admin, bot_manager, human_agent, analyst, viewer",
+			"error":   "არასწორი როლი",
+			"details": "როლი უნდა იყოს ერთ-ერთი: company_admin, bot_manager, human_agent, analyst, viewer",
 			"valid_roles": []string{
 				string(models.RoleCompanyAdmin),
 				string(models.RoleBotManager),
@@ -127,21 +131,21 @@ func AdminCreateUser(c *fiber.Ctx) error {
 
 	// Save to database without hashing password (it's already hashed)
 	if err := services.CreateUserWithHashedPassword(ctx, user); err != nil {
-		slog.Error("Failed to create user", "error", err)
+		slog.Error("მომხმარებლის შექმნა ვერ მოხერხდა", "შეცდომა", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error":   "Failed to create user",
+			"error":   "მომხმარებლის შექმნა ვერ მოხერხდა",
 			"details": err.Error(),
 		})
 	}
 
-	slog.Info("User created successfully by admin",
-		"userID", user.ID.Hex(),
-		"username", user.Username,
-		"companyID", user.CompanyID,
-		"role", user.Role)
+	slog.Info("მომხმარებელი წარმატებით შეიქმნა ადმინის მიერ",
+		"მომხმარებლისID", user.ID.Hex(),
+		"მომხმარებელი", user.Username,
+		"კომპანიისID", user.CompanyID,
+		"როლი", user.Role)
 
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
-		"message": "User created successfully",
+		"message": "მომხმარებელი წარმატებით შეიქმნა",
 		"user": fiber.Map{
 			"id":         user.ID.Hex(),
 			"username":   user.Username,
@@ -164,7 +168,7 @@ func CreateUser(c *fiber.Ctx) error {
 	companyID := c.Locals("company_id")
 	if companyID == nil {
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
-			"error": "Company ID not found in session",
+			"error": "კომპანიის ID სესიაში ვერ მოიძებნა",
 		})
 	}
 
@@ -172,7 +176,7 @@ func CreateUser(c *fiber.Ctx) error {
 	userRole := c.Locals("role")
 	if userRole != string(models.RoleCompanyAdmin) {
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
-			"error": "Only company admins can create users",
+			"error": "მხოლოდ კომპანიის ადმინისტრატორებს შეუძლიათ მომხმარებლების შექმნა",
 		})
 	}
 
@@ -188,7 +192,7 @@ func CreateUser(c *fiber.Ctx) error {
 	// Parse request body
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error":   "Invalid request body",
+			"error":   "არასწორი მოთხოვნის ტექსტი",
 			"details": err.Error(),
 		})
 	}
@@ -196,8 +200,8 @@ func CreateUser(c *fiber.Ctx) error {
 	// Validate role
 	if !models.IsValidRole(req.Role) {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error":   "Invalid role",
-			"details": "Role must be one of: company_admin, bot_manager, human_agent, analyst, viewer",
+			"error":   "არასწორი როლი",
+			"details": "როლი უნდა იყოს ერთ-ერთი: company_admin, bot_manager, human_agent, analyst, viewer",
 			"valid_roles": []string{
 				string(models.RoleCompanyAdmin),
 				string(models.RoleBotManager),
@@ -227,7 +231,7 @@ func CreateUser(c *fiber.Ctx) error {
 	if err := services.CreateUser(ctx, user); err != nil {
 		slog.Error("Failed to create user", "error", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error":   "Failed to create user",
+			"error":   "მომხმარებლის შექმნა ვერ მოხერხდა",
 			"details": err.Error(),
 		})
 	}
@@ -239,7 +243,7 @@ func CreateUser(c *fiber.Ctx) error {
 		"role", user.Role)
 
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
-		"message": "User created successfully",
+		"message": "მომხმარებელი წარმატებით შეიქმნა",
 		"user": fiber.Map{
 			"id":         user.ID.Hex(),
 			"username":   user.Username,
@@ -257,7 +261,7 @@ func GetUser(c *fiber.Ctx) error {
 	userID := c.Params("userID")
 	if userID == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": "User ID is required",
+			"error": "მომხმარებლის ID აუცილებელია",
 		})
 	}
 
@@ -266,7 +270,7 @@ func GetUser(c *fiber.Ctx) error {
 
 	if companyID == nil {
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
-			"error": "Company ID not found in session",
+			"error": "კომპანიის ID სესიაში ვერ მოიძებნა",
 		})
 	}
 
@@ -276,7 +280,7 @@ func GetUser(c *fiber.Ctx) error {
 	user, err := services.GetUserByIDAndCompanyID(ctx, userID, companyID.(string))
 	if err != nil {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
-			"error":   "User not found",
+			"error":   "მომხმარებელი ვერ მოიძებნა",
 			"details": err.Error(),
 		})
 	}
@@ -290,7 +294,7 @@ func GetCompanyUsers(c *fiber.Ctx) error {
 	companyID := c.Locals("company_id")
 	if companyID == nil {
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
-			"error": "Company ID not found in session",
+			"error": "კომპანიის ID სესიაში ვერ მოიძებნა",
 		})
 	}
 
@@ -300,7 +304,7 @@ func GetCompanyUsers(c *fiber.Ctx) error {
 	users, err := services.GetUsersByCompany(ctx, companyID.(string))
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error":   "Failed to retrieve users",
+			"error":   "მომხმარებლების მიღება ვერ მოხერხდა",
 			"details": err.Error(),
 		})
 	}
@@ -332,7 +336,7 @@ func UpdateUserRole(c *fiber.Ctx) error {
 	userID := c.Params("userID")
 	if userID == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": "User ID is required",
+			"error": "მომხმარებლის ID აუცილებელია",
 		})
 	}
 
@@ -340,7 +344,7 @@ func UpdateUserRole(c *fiber.Ctx) error {
 	companyID := c.Locals("company_id")
 	if companyID == nil {
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
-			"error": "Company ID not found in session",
+			"error": "კომპანიის ID სესიაში ვერ მოიძებნა",
 		})
 	}
 
@@ -348,7 +352,7 @@ func UpdateUserRole(c *fiber.Ctx) error {
 	userRole := c.Locals("role")
 	if userRole != string(models.RoleCompanyAdmin) {
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
-			"error": "Only company admins can update user roles",
+			"error": "მხოლოდ კომპანიის ადმინისტრატორებს შეუძლიათ როლების განახლება",
 		})
 	}
 
@@ -358,7 +362,7 @@ func UpdateUserRole(c *fiber.Ctx) error {
 
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error":   "Invalid request body",
+			"error":   "არასწორი მოთხოვნის ტექსტი",
 			"details": err.Error(),
 		})
 	}
@@ -366,7 +370,7 @@ func UpdateUserRole(c *fiber.Ctx) error {
 	// Validate role
 	if !models.IsValidRole(req.Role) {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": "Invalid role",
+			"error": "არასწორი როლი",
 			"valid_roles": []string{
 				string(models.RoleCompanyAdmin),
 				string(models.RoleBotManager),
@@ -384,7 +388,7 @@ func UpdateUserRole(c *fiber.Ctx) error {
 	_, err := services.GetUserByIDAndCompanyID(ctx, userID, companyID.(string))
 	if err != nil {
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
-			"error": "User not found in your company",
+			"error": "მომხმარებელი თქვენს კომპანიაში ვერ მოიძებნა",
 		})
 	}
 
@@ -392,7 +396,7 @@ func UpdateUserRole(c *fiber.Ctx) error {
 
 	if err := services.UpdateUser(ctx, userID, update); err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error":   "Failed to update user role",
+			"error":   "მომხმარებლის როლის განახლება ვერ მოხერხდა",
 			"details": err.Error(),
 		})
 	}
@@ -400,7 +404,7 @@ func UpdateUserRole(c *fiber.Ctx) error {
 	slog.Info("User role updated", "userID", userID, "newRole", req.Role)
 
 	return c.JSON(fiber.Map{
-		"message":  "User role updated successfully",
+		"message":  "მომხმარებლის როლი წარმატებით განახლდა",
 		"user_id":  userID,
 		"new_role": req.Role,
 	})
@@ -409,7 +413,7 @@ func UpdateUserRole(c *fiber.Ctx) error {
 // RegenerateUserAPIKey is deprecated - API keys are no longer used
 func RegenerateUserAPIKey(c *fiber.Ctx) error {
 	return c.Status(fiber.StatusGone).JSON(fiber.Map{
-		"error": "API key functionality has been removed. Please use session-based authentication.",
+		"error": "API გასაღების ფუნქციონალი ამოღებულია. გთხოვთ გამოიყენოთ სესიაზე დაფუძნებული აუთენტიფიკაცია.",
 	})
 }
 
@@ -424,6 +428,8 @@ type CreateCompanyRequest struct {
 	ClaudeModel     string `json:"claude_model,omitempty"`
 	VoyageAPIKey    string `json:"voyage_api_key,omitempty"`
 	VoyageModel     string `json:"voyage_model,omitempty"`
+	GPTAPIKey       string `json:"gpt_api_key,omitempty"`
+	GPTModel        string `json:"gpt_model,omitempty"`
 	SystemPrompt    string `json:"system_prompt,omitempty"`
 	MaxTokens       int    `json:"max_tokens,omitempty"`
 	ResponseDelay   int    `json:"response_delay,omitempty"`
@@ -435,7 +441,7 @@ func CreateCompany(c *fiber.Ctx) error {
 	var req CreateCompanyRequest
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error":   "Invalid request body",
+			"error":   "არასწორი მოთხოვნის ტექსტი",
 			"details": err.Error(),
 		})
 	}
@@ -453,6 +459,8 @@ func CreateCompany(c *fiber.Ctx) error {
 		ClaudeModel:     req.ClaudeModel,
 		VoyageAPIKey:    req.VoyageAPIKey,
 		VoyageModel:     req.VoyageModel,
+		GPTAPIKey:       req.GPTAPIKey,
+		GPTModel:        req.GPTModel,
 		SystemPrompt:    req.SystemPrompt,
 		IsActive:        true,
 		MaxTokens:       req.MaxTokens,
@@ -471,7 +479,7 @@ func CreateCompany(c *fiber.Ctx) error {
 	if err := services.CreateCompany(ctx, newCompany); err != nil {
 		slog.Error("Failed to create company", "error", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error":   "Failed to create company",
+			"error":   "კომპანიის შექმნა ვერ მოხერხდა",
 			"details": err.Error(),
 		})
 	}
@@ -483,7 +491,7 @@ func CreateCompany(c *fiber.Ctx) error {
 
 	// Return the generated company ID
 	return c.JSON(fiber.Map{
-		"message":    "Company created successfully",
+		"message":    "კომპანია წარმატებით შეიქმნა",
 		"company_id": newCompany.CompanyID,
 		"company": fiber.Map{
 			"company_id":   newCompany.CompanyID,
@@ -500,7 +508,7 @@ func AddPageToCompany(c *fiber.Ctx) error {
 	companyID := c.Locals("company_id")
 	if companyID == nil {
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
-			"error": "Company ID not found in session",
+			"error": "კომპანიის ID სესიაში ვერ მოიძებნა",
 		})
 	}
 
@@ -508,14 +516,14 @@ func AddPageToCompany(c *fiber.Ctx) error {
 	userRole := c.Locals("role")
 	if userRole != string(models.RoleCompanyAdmin) {
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
-			"error": "Only company admins can add pages",
+			"error": "მხოლოდ კომპანიის ადმინისტრატორებს შეუძლიათ გვერდების დამატება",
 		})
 	}
 
 	var page PageRequest
 	if err := c.BodyParser(&page); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error":   "Invalid request body",
+			"error":   "არასწორი მოთხოვნის ტექსტი",
 			"details": err.Error(),
 		})
 	}
@@ -527,7 +535,7 @@ func AddPageToCompany(c *fiber.Ctx) error {
 	existingCompany, err := services.GetCompanyByID(ctx, companyID.(string))
 	if err != nil {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
-			"error":   "Company not found",
+			"error":   "კომპანია ვერ მოიძებნა",
 			"details": err.Error(),
 		})
 	}
@@ -536,7 +544,7 @@ func AddPageToCompany(c *fiber.Ctx) error {
 	for _, existingPage := range existingCompany.Pages {
 		if existingPage.PageID == page.PageID {
 			return c.Status(fiber.StatusConflict).JSON(fiber.Map{
-				"error": "Page already exists for this company",
+				"error": "გვერდი უკვე არსებობს ამ კომპანიისთვის",
 			})
 		}
 	}
@@ -562,6 +570,8 @@ func AddPageToCompany(c *fiber.Ctx) error {
 		newPage.ClaudeModel = defaultPage.ClaudeModel
 		newPage.VoyageAPIKey = defaultPage.VoyageAPIKey
 		newPage.VoyageModel = defaultPage.VoyageModel
+		newPage.GPTAPIKey = defaultPage.GPTAPIKey
+		newPage.GPTModel = defaultPage.GPTModel
 		newPage.SystemPrompt = defaultPage.SystemPrompt
 		newPage.MaxTokens = defaultPage.MaxTokens
 	}
@@ -579,7 +589,7 @@ func AddPageToCompany(c *fiber.Ctx) error {
 	if err := services.UpdateCompany(ctx, companyID.(string), updateData); err != nil {
 		slog.Error("Failed to add page to company", "error", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error":   "Failed to add page to company",
+			"error":   "გვერდის დამატება კომპანიაში ვერ მოხერხდა",
 			"details": err.Error(),
 		})
 	}
@@ -590,7 +600,7 @@ func AddPageToCompany(c *fiber.Ctx) error {
 		"pageName", page.PageName)
 
 	return c.JSON(fiber.Map{
-		"message": "Page added successfully",
+		"message": "გვერდი წარმატებით დაემატა",
 		"page": fiber.Map{
 			"page_id":           page.PageID,
 			"page_name":         page.PageName,
@@ -606,7 +616,7 @@ func AddPageWithFullDetails(c *fiber.Ctx) error {
 	companyID := c.Locals("company_id")
 	if companyID == nil {
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
-			"error": "Company ID not found in session",
+			"error": "კომპანიის ID სესიაში ვერ მოიძებნა",
 		})
 	}
 
@@ -614,14 +624,14 @@ func AddPageWithFullDetails(c *fiber.Ctx) error {
 	userRole := c.Locals("role")
 	if userRole != string(models.RoleCompanyAdmin) {
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
-			"error": "Only company admins can add pages",
+			"error": "მხოლოდ კომპანიის ადმინისტრატორებს შეუძლიათ გვერდების დამატება",
 		})
 	}
 
 	var req PageFullRequest
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error":   "Invalid request body",
+			"error":   "არასწორი მოთხოვნის ტექსტი",
 			"details": err.Error(),
 		})
 	}
@@ -633,7 +643,7 @@ func AddPageWithFullDetails(c *fiber.Ctx) error {
 	existingCompany, err := services.GetCompanyByID(ctx, companyID.(string))
 	if err != nil {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
-			"error":   "Company not found",
+			"error":   "კომპანია ვერ მოიძებნა",
 			"details": err.Error(),
 		})
 	}
@@ -642,7 +652,7 @@ func AddPageWithFullDetails(c *fiber.Ctx) error {
 	for _, existingPage := range existingCompany.Pages {
 		if existingPage.PageID == req.PageID {
 			return c.Status(fiber.StatusConflict).JSON(fiber.Map{
-				"error": "Page already exists for this company",
+				"error": "გვერდი უკვე არსებობს ამ კომპანიისთვის",
 			})
 		}
 	}
@@ -657,6 +667,8 @@ func AddPageWithFullDetails(c *fiber.Ctx) error {
 		ClaudeModel:     req.ClaudeModel,
 		VoyageAPIKey:    req.VoyageAPIKey,
 		VoyageModel:     req.VoyageModel,
+		GPTAPIKey:       req.GPTAPIKey,
+		GPTModel:        req.GPTModel,
 		SystemPrompt:    req.SystemPrompt,
 		IsActive:        req.IsActive,
 		MaxTokens:       req.MaxTokens,
@@ -683,7 +695,7 @@ func AddPageWithFullDetails(c *fiber.Ctx) error {
 	if err := services.UpdateCompany(ctx, companyID.(string), updateData); err != nil {
 		slog.Error("Failed to add page with full details to company", "error", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error":   "Failed to add page to company",
+			"error":   "გვერდის დამატება კომპანიაში ვერ მოხერხდა",
 			"details": err.Error(),
 		})
 	}
@@ -700,7 +712,7 @@ func AddPageWithFullDetails(c *fiber.Ctx) error {
 	}
 
 	return c.JSON(fiber.Map{
-		"message": "Page added successfully with full configuration",
+		"message": "გვერდი წარმატებით დაემატა სრული კონფიგურაციით",
 		"page": fiber.Map{
 			"page_id":           req.PageID,
 			"page_name":         req.PageName,
@@ -723,7 +735,7 @@ func UpdatePageConfiguration(c *fiber.Ctx) error {
 	companyID := c.Locals("company_id")
 	if companyID == nil {
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
-			"error": "Company ID not found in session",
+			"error": "კომპანიის ID სესიაში ვერ მოიძებნა",
 		})
 	}
 
@@ -731,21 +743,21 @@ func UpdatePageConfiguration(c *fiber.Ctx) error {
 	userRole := c.Locals("role")
 	if userRole != string(models.RoleCompanyAdmin) {
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
-			"error": "Only company admins can update pages",
+			"error": "მხოლოდ კომპანიის ადმინისტრატორებს შეუძლიათ გვერდების განახლება",
 		})
 	}
 
 	pageID := c.Params("pageID")
 	if pageID == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": "Page ID is required",
+			"error": "გვერდის ID აუცილებელია",
 		})
 	}
 
 	var req PageUpdateRequest
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error":   "Invalid request body",
+			"error":   "არასწორი მოთხოვნის ტექსტი",
 			"details": err.Error(),
 		})
 	}
@@ -757,7 +769,7 @@ func UpdatePageConfiguration(c *fiber.Ctx) error {
 	company, err := services.GetCompanyByID(ctx, companyID.(string))
 	if err != nil {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
-			"error":   "Company not found",
+			"error":   "კომპანია ვერ მოიძებნა",
 			"details": err.Error(),
 		})
 	}
@@ -791,6 +803,12 @@ func UpdatePageConfiguration(c *fiber.Ctx) error {
 			if req.VoyageModel != "" {
 				page.VoyageModel = req.VoyageModel
 			}
+			if req.GPTAPIKey != "" {
+				page.GPTAPIKey = req.GPTAPIKey
+			}
+			if req.GPTModel != "" {
+				page.GPTModel = req.GPTModel
+			}
 			if req.SystemPrompt != "" {
 				page.SystemPrompt = req.SystemPrompt
 			}
@@ -806,7 +824,7 @@ func UpdatePageConfiguration(c *fiber.Ctx) error {
 
 	if !pageFound {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
-			"error": "Page not found in company",
+			"error": "გვერდი კომპანიაში ვერ მოიძებნა",
 		})
 	}
 
@@ -821,7 +839,7 @@ func UpdatePageConfiguration(c *fiber.Ctx) error {
 	if err := services.UpdateCompany(ctx, companyID.(string), updateData); err != nil {
 		slog.Error("Failed to update page configuration", "error", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error":   "Failed to update page configuration",
+			"error":   "გვერდის კონფიგურაციის განახლება ვერ მოხერხდა",
 			"details": err.Error(),
 		})
 	}
@@ -831,7 +849,7 @@ func UpdatePageConfiguration(c *fiber.Ctx) error {
 		"pageID", pageID)
 
 	return c.JSON(fiber.Map{
-		"message": "Page configuration updated successfully",
+		"message": "გვერდის კონფიგურაცია წარმატებით განახლდა",
 		"page_id": pageID,
 	})
 }
@@ -842,7 +860,7 @@ func GetCompany(c *fiber.Ctx) error {
 	companyID := c.Locals("company_id")
 	if companyID == nil {
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
-			"error": "Company ID not found in session",
+			"error": "კომპანიის ID სესიაში ვერ მოიძებნა",
 		})
 	}
 
@@ -853,7 +871,7 @@ func GetCompany(c *fiber.Ctx) error {
 	company, err := services.GetCompanyByID(ctx, companyID.(string))
 	if err != nil {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
-			"error":   "Company not found",
+			"error":   "კომპანია ვერ მოიძებნა",
 			"details": err.Error(),
 		})
 	}
@@ -874,6 +892,8 @@ func GetCompany(c *fiber.Ctx) error {
 			"claude_model":      page.ClaudeModel,
 			"voyage_api_key":    "***HIDDEN***",
 			"voyage_model":      page.VoyageModel,
+			"gpt_api_key":       "***HIDDEN***",
+			"gpt_model":         page.GPTModel,
 			"system_prompt":     page.SystemPrompt,
 			"is_active":         page.IsActive,
 			"max_tokens":        page.MaxTokens,
@@ -905,7 +925,7 @@ func TestWebhookConnection(c *fiber.Ctx) error {
 
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error":   "Invalid request body",
+			"error":   "არასწორი მოთხოვნის ტექსტი",
 			"details": err.Error(),
 		})
 	}
@@ -917,7 +937,7 @@ func TestWebhookConnection(c *fiber.Ctx) error {
 	company, err := services.GetCompanyByPageID(ctx, req.PageID)
 	if err != nil {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
-			"error":   "Company not found for this page",
+			"error":   "კომპანია ამ გვერდისთვის ვერ მოიძებნა",
 			"details": err.Error(),
 		})
 	}
@@ -926,13 +946,13 @@ func TestWebhookConnection(c *fiber.Ctx) error {
 	pageConfig, err := services.GetPageConfig(company, req.PageID)
 	if err != nil {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
-			"error":   "Page configuration not found",
+			"error":   "გვერდის კონფიგურაცია ვერ მოიძებნა",
 			"details": err.Error(),
 		})
 	}
 
 	return c.JSON(fiber.Map{
-		"message":           "Page configuration found successfully",
+		"message":           "გვერდის კონფიგურაცია წარმატებით მოიძებნა",
 		"company_id":        company.CompanyID,
 		"company_name":      company.CompanyName,
 		"page_id":           pageConfig.PageID,
@@ -968,7 +988,7 @@ func ToggleCRMLink(c *fiber.Ctx) error {
 	companyID := c.Locals("company_id")
 	if companyID == nil {
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
-			"error": "Company ID not found in session",
+			"error": "კომპანიის ID სესიაში ვერ მოიძებნა",
 		})
 	}
 
@@ -976,7 +996,7 @@ func ToggleCRMLink(c *fiber.Ctx) error {
 	pageID := c.Params("pageID")
 	if pageID == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": "Page ID is required",
+			"error": "გვერდის ID აუცილებელია",
 		})
 	}
 
@@ -988,13 +1008,13 @@ func ToggleCRMLink(c *fiber.Ctx) error {
 
 	if err := c.BodyParser(&reqBody); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": "Invalid request body",
+			"error": "არასწორი მოთხოვნის ტექსტი",
 		})
 	}
 
 	if reqBody.URL == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": "CRM URL is required",
+			"error": "CRM URL აუცილებელია",
 		})
 	}
 
@@ -1005,7 +1025,7 @@ func ToggleCRMLink(c *fiber.Ctx) error {
 	_, err := services.ValidatePageOwnership(ctx, pageID, companyID.(string))
 	if err != nil {
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
-			"error": "Page not found or access denied",
+			"error": "გვერდი ვერ მოიძებნა ან წვდომა აკრძალულია",
 		})
 	}
 
@@ -1029,7 +1049,7 @@ func ToggleCRMLink(c *fiber.Ctx) error {
 		"isActive", reqBody.IsActive)
 
 	return c.JSON(fiber.Map{
-		"message":   "CRM link status updated successfully",
+		"message":   "CRM ბმულის სტატუსი წარმატებით განახლდა",
 		"url":       reqBody.URL,
 		"is_active": reqBody.IsActive,
 	})
@@ -1041,7 +1061,7 @@ func GetCRMLinks(c *fiber.Ctx) error {
 	companyID := c.Locals("company_id")
 	if companyID == nil {
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
-			"error": "Company ID not found in session",
+			"error": "კომპანიის ID სესიაში ვერ მოიძებნა",
 		})
 	}
 
@@ -1049,7 +1069,7 @@ func GetCRMLinks(c *fiber.Ctx) error {
 	pageID := c.Params("pageID")
 	if pageID == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": "Page ID is required",
+			"error": "გვერდის ID აუცილებელია",
 		})
 	}
 
@@ -1060,7 +1080,7 @@ func GetCRMLinks(c *fiber.Ctx) error {
 	_, err := services.ValidatePageOwnership(ctx, pageID, companyID.(string))
 	if err != nil {
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
-			"error": "Page not found or access denied",
+			"error": "გვერდი ვერ მოიძებნა ან წვდომა აკრძალულია",
 		})
 	}
 
@@ -1072,7 +1092,7 @@ func GetCRMLinks(c *fiber.Ctx) error {
 			"pageID", pageID,
 			"error", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": "Failed to retrieve CRM links",
+			"error": "CRM ბმულების მიღება ვერ მოხერხდა",
 		})
 	}
 
@@ -1089,7 +1109,7 @@ func UpdateCRMLink(c *fiber.Ctx) error {
 	companyID := c.Locals("company_id")
 	if companyID == nil {
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
-			"error": "Company ID not found in session",
+			"error": "კომპანიის ID სესიაში ვერ მოიძებნა",
 		})
 	}
 
@@ -1097,7 +1117,7 @@ func UpdateCRMLink(c *fiber.Ctx) error {
 	pageID := c.Params("pageID")
 	if pageID == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": "Page ID is required",
+			"error": "გვერდის ID აუცილებელია",
 		})
 	}
 
@@ -1105,13 +1125,13 @@ func UpdateCRMLink(c *fiber.Ctx) error {
 	var reqBody models.CRMLink
 	if err := c.BodyParser(&reqBody); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": "Invalid request body",
+			"error": "არასწორი მოთხოვნის ტექსტი",
 		})
 	}
 
 	if reqBody.URL == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": "CRM URL is required",
+			"error": "CRM URL აუცილებელია",
 		})
 	}
 
@@ -1122,7 +1142,7 @@ func UpdateCRMLink(c *fiber.Ctx) error {
 	_, err := services.ValidatePageOwnership(ctx, pageID, companyID.(string))
 	if err != nil {
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
-			"error": "Page not found or access denied",
+			"error": "გვერდი ვერ მოიძებნა ან წვდომა აკრძალულია",
 		})
 	}
 
@@ -1141,7 +1161,7 @@ func UpdateCRMLink(c *fiber.Ctx) error {
 	err = collection.FindOne(ctx, filter).Decode(&company)
 	if err != nil {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
-			"error": "Company or page not found",
+			"error": "კომპანია ან გვერდი ვერ მოიძებნა",
 		})
 	}
 
@@ -1163,7 +1183,7 @@ func UpdateCRMLink(c *fiber.Ctx) error {
 
 	if pageIndex == -1 {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
-			"error": "Page not found",
+			"error": "გვერდი ვერ მოიძებნა",
 		})
 	}
 
@@ -1195,7 +1215,7 @@ func UpdateCRMLink(c *fiber.Ctx) error {
 			"pageID", pageID,
 			"error", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": "Failed to update CRM link",
+			"error": "CRM ბმულის განახლება ვერ მოხერხდა",
 		})
 	}
 

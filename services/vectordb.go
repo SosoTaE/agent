@@ -68,32 +68,51 @@ func GetEmbeddings(ctx context.Context, text string, companyID string, pageID st
 		return nil, fmt.Errorf("no page configuration found")
 	}
 
-	// Check if Voyage is configured
-	if pageConfig.VoyageAPIKey == "" {
-		slog.Warn("No Voyage API key configured, using mock embeddings",
-			"companyID", companyID,
-			"pageID", pageID,
-		)
-		mockEmbeddings := GetMockEmbeddings([]string{text})
-		return mockEmbeddings[0], nil
+	// Check if GPT is configured (prioritize GPT over Voyage)
+	if pageConfig.GPTAPIKey != "" {
+		model := pageConfig.GPTModel
+		if model == "" {
+			model = "text-embedding-3-large" // Default GPT embedding model
+		}
+
+		embeddings, err := GetOpenAIEmbeddings(ctx, []string{text}, pageConfig.GPTAPIKey, model)
+		if err != nil {
+			return nil, fmt.Errorf("GPT embedding failed: %w", err)
+		}
+
+		if len(embeddings) == 0 {
+			return nil, fmt.Errorf("no embeddings generated")
+		}
+
+		return embeddings[0], nil
 	}
 
-	// Use Voyage embeddings
-	model := pageConfig.VoyageModel
-	if model == "" {
-		model = "voyage-2" // Default Voyage model
+	// Fall back to Voyage if configured
+	if pageConfig.VoyageAPIKey != "" {
+		model := pageConfig.VoyageModel
+		if model == "" {
+			model = "voyage-2" // Default Voyage model
+		}
+
+		embeddings, err := GetVoyageEmbeddings(ctx, []string{text}, pageConfig.VoyageAPIKey, model)
+		if err != nil {
+			return nil, fmt.Errorf("Voyage embedding failed: %w", err)
+		}
+
+		if len(embeddings) == 0 {
+			return nil, fmt.Errorf("no embeddings generated")
+		}
+
+		return embeddings[0], nil
 	}
 
-	embeddings, err := GetVoyageEmbeddings(ctx, []string{text}, pageConfig.VoyageAPIKey, model)
-	if err != nil {
-		return nil, fmt.Errorf("Voyage embedding failed: %w", err)
-	}
-
-	if len(embeddings) == 0 {
-		return nil, fmt.Errorf("no embeddings generated")
-	}
-
-	return embeddings[0], nil
+	// If neither GPT nor Voyage is configured, use mock embeddings
+	slog.Warn("No embedding API configured, using mock embeddings",
+		"companyID", companyID,
+		"pageID", pageID,
+	)
+	mockEmbeddings := GetMockEmbeddings([]string{text})
+	return mockEmbeddings[0], nil
 }
 
 // CosineSimilarity calculates the cosine similarity between two vectors
